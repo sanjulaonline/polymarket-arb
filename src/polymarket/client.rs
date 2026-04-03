@@ -2,7 +2,7 @@
 /// API docs: https://docs.polymarket.com/#clob-client
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,28 @@ pub struct Market {
 struct MarketsPage {
     data: Vec<Market>,
     next_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GammaEvent {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    markets: Vec<GammaMarket>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GammaMarket {
+    #[serde(rename = "clobTokenIds")]
+    clob_token_ids: Option<String>,
+    outcomes: Option<String>,
+    #[serde(rename = "endDate")]
+    end_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerTimeResponse {
+    timestamp: i64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -144,8 +166,25 @@ impl PolymarketClient {
         B64.encode(mac.finalize().into_bytes())
     }
 
-    fn auth_headers(&self, method: &str, path: &str, body: &str) -> Vec<(String, String)> {
-        let ts = Utc::now().timestamp();
+    async fn auth_headers(&self, method: &str, path: &str, body: &str) -> Vec<(String, String)> {
+        let local_ts = Utc::now().timestamp();
+        let ts = match self.fetch_server_time().await {
+            Ok(server_ts) => {
+                let skew = server_ts - local_ts;
+                if skew.abs() > 300 {
+                    warn!(
+                        "[Client] Large local/server time skew detected ({}s); using server timestamp",
+                        skew
+                    );
+                }
+                server_ts
+            }
+            Err(e) => {
+                debug!("[Client] Failed to fetch server time: {e}; falling back to local clock");
+                local_ts
+            }
+        };
+
         let sig = self.sign(ts, method, path, body);
         vec![
             ("POLY-API-KEY".to_string(), self.api_key.clone()),
@@ -153,6 +192,145 @@ impl PolymarketClient {
             ("POLY-TIMESTAMP".to_string(), ts.to_string()),
             ("POLY-PASSPHRASE".to_string(), self.passphrase.clone()),
         ]
+    }
+
+    async fn fetch_server_time(&self) -> Result<i64> {
+        let url = format!("{}/time", CLOB_BASE);
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .context("GET /time")?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow!("/time failed with HTTP {}", resp.status()));
+        }
+
+        let body: ServerTimeResponse = resp.json().await.context("parse /time")?;
+        Ok(body.timestamp)
+    }
+
+    async fn get_updown_market_from_gamma(&self, asset_slug: &str, tf: Timeframe) -> Result<Market> {
+        let (bucket_size_min, interval_secs, kline_interval) = match tf {
+            Timeframe::FiveMin => (5u32, 300i64, "5m"),
+            Timeframe::FifteenMin => (15u32, 900i64, "15m"),
+        };
+
+        let now = Utc::now();
+        let current_bucket_minute = (now.minute() / bucket_size_min) * bucket_size_min;
+        let current_bucket_start = now
+            .with_minute(current_bucket_minute)
+            .and_then(|dt| dt.with_second(0))
+            .and_then(|dt| dt.with_nanosecond(0))
+            .ok_or_else(|| anyhow!("failed to compute current candle bucket"))?;
+
+        // Check current and next bucket to avoid edge timing misses.
+        let timestamps = [
+            current_bucket_start.timestamp(),
+            current_bucket_start.timestamp() + interval_secs,
+        ];
+
+        for ts in timestamps {
+            let slug = format!("{}-updown-{}-{}", asset_slug, kline_interval, ts);
+            let url = format!("https://gamma-api.polymarket.com/events?slug={}", slug);
+
+            let resp = self
+                .http
+                .get(&url)
+                .send()
+                .await
+                .with_context(|| format!("GET gamma events for slug {slug}"))?;
+
+            if !resp.status().is_success() {
+                debug!("[Client] gamma slug {} returned HTTP {}", slug, resp.status());
+                continue;
+            }
+
+            let events: Vec<GammaEvent> = resp
+                .json()
+                .await
+                .with_context(|| format!("parse gamma events for slug {slug}"))?;
+
+            let Some(event) = events.first() else {
+                continue;
+            };
+
+            let Some(m) = event.markets.first() else {
+                continue;
+            };
+
+            let expiration = m
+                .end_date
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.timestamp())
+                .unwrap_or(0);
+
+            if expiration <= Utc::now().timestamp() {
+                continue;
+            }
+
+            let token_ids_raw = match &m.clob_token_ids {
+                Some(v) => v,
+                None => continue,
+            };
+            let outcomes_raw = match &m.outcomes {
+                Some(v) => v,
+                None => continue,
+            };
+
+            let token_ids: Vec<String> = serde_json::from_str(token_ids_raw)
+                .with_context(|| format!("parse clobTokenIds for slug {slug}"))?;
+            let outcomes: Vec<String> = serde_json::from_str(outcomes_raw)
+                .with_context(|| format!("parse outcomes for slug {slug}"))?;
+
+            let mut yes_token = None;
+            let mut no_token = None;
+
+            for (idx, outcome) in outcomes.iter().enumerate() {
+                let Some(token_id) = token_ids.get(idx) else {
+                    continue;
+                };
+                if outcome.eq_ignore_ascii_case("UP") || outcome.eq_ignore_ascii_case("YES") {
+                    yes_token = Some(token_id.clone());
+                } else if outcome.eq_ignore_ascii_case("DOWN") || outcome.eq_ignore_ascii_case("NO") {
+                    no_token = Some(token_id.clone());
+                }
+            }
+
+            if let (Some(yes), Some(no)) = (yes_token, no_token) {
+                info!(
+                    "[Client] Found {} {} market via gamma slug {}",
+                    asset_slug.to_uppercase(),
+                    kline_interval,
+                    slug
+                );
+
+                return Ok(Market {
+                    condition_id: slug.clone(),
+                    question: if event.title.is_empty() { slug } else { event.title.clone() },
+                    tokens: vec![
+                        Token {
+                            token_id: yes,
+                            outcome: "Yes".to_string(),
+                        },
+                        Token {
+                            token_id: no,
+                            outcome: "No".to_string(),
+                        },
+                    ],
+                    active: true,
+                    closed: false,
+                });
+            }
+        }
+
+        Err(anyhow!(
+            "No active {} {:?} up/down market found via gamma slug",
+            asset_slug,
+            tf
+        ))
     }
 
     // ── API calls ─────────────────────────────────────────────────────────────
@@ -182,6 +360,15 @@ impl PolymarketClient {
             "[Client] Searching Polymarket for BTC {} minute market...",
             minute_str
         );
+
+        // Prefer deterministic slug lookup first; fall back to text search.
+        match self.get_updown_market_from_gamma("btc", tf).await {
+            Ok(m) => return Ok(m),
+            Err(e) => warn!(
+                "[Client] Gamma slug lookup failed for BTC {}m: {e}. Falling back to /markets search.",
+                minute_str
+            ),
+        }
 
         self.search_markets(&["bitcoin", "btc"], |m| {
             if !m.active || m.closed {
@@ -313,7 +500,7 @@ impl PolymarketClient {
     pub async fn place_order(&self, order: &OrderRequest) -> Result<String> {
         let path = "/order";
         let body = serde_json::to_string(order)?;
-        let headers = self.auth_headers("POST", path, &body);
+        let headers = self.auth_headers("POST", path, &body).await;
 
         let mut req = self.http.post(format!("{}{}", CLOB_BASE, path));
         for (k, v) in headers {
@@ -337,7 +524,7 @@ impl PolymarketClient {
     /// Cancel an order by id.
     pub async fn cancel_order(&self, order_id: &str) -> Result<()> {
         let path = format!("/order/{}", order_id);
-        let headers = self.auth_headers("DELETE", &path, "");
+        let headers = self.auth_headers("DELETE", &path, "").await;
 
         let mut req = self.http.delete(format!("{}{}", CLOB_BASE, path));
         for (k, v) in headers {
