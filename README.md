@@ -28,7 +28,8 @@ prompt spec, rewritten in Rust for sub-100ms execution, and heavily upgraded wit
 | Telegram alerts on drawdown | ✅ |
 | Kill switch at 20% daily drawdown | ✅ `DAILY_DRAWDOWN_KILL_PCT` |
 | SQLite trade log with full history | ✅ `database.rs` |
-| Terminal dashboard (P&L, win rate, open positions, last 10 trades) | ✅ `dashboard.rs` |
+| Console-only runtime logs (default) | ✅ |
+| Optional terminal dashboard (ENABLE_TUI=true) | ✅ `dashboard.rs` |
 | Full error handling + retry logic | ✅ |
 | Rate limiting awareness | ✅ |
 
@@ -109,7 +110,8 @@ MARKET_TIMEFRAMES=5m,15m  # both (default)
 - Create a key — you'll get `api_key`, `secret`, `passphrase`
 - Set `POLYMARKET_PRIVATE_KEY` to your wallet's private key
 - Set `PROXY_WALLET` to the wallet address whose USDC.e balance should size paper bankroll
-- Optionally set `POLYGON_RPC_URL` (defaults to `https://polygon-rpc.com`)
+- Optionally set `POLYGON_RPC_URL` (defaults to `https://polygon.publicnode.com`)
+- Optional fallback list: `POLYGON_RPC_FALLBACK_URLS` (comma-separated)
 
 ### 4. Build release binary
 
@@ -124,7 +126,15 @@ cargo build --release
 ./target/release/bot
 ```
 
-The terminal dashboard opens immediately. Press `q` to quit.
+By default the bot runs in console-log mode only.
+
+To enable the terminal dashboard:
+
+```env
+ENABLE_TUI=true
+```
+
+In TUI mode, press `q`/`Esc` to quit.
 
 ---
 
@@ -139,6 +149,10 @@ When paper mode is enabled, startup bankroll source priority is:
 
 The Polygon path is the Rust port of the typical ethers.js flow:
 `new Contract(USDC).balanceOf(proxyWallet)` with 6 decimals.
+
+If your primary RPC returns auth errors (401/403, disabled API key, etc.),
+the bot automatically retries `POLYGON_RPC_FALLBACK_URLS` before falling back
+to CLOB/env bankroll sources.
 
 To enable live trading, **all four** conditions must be met in `.env`:
 

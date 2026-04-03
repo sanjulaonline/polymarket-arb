@@ -12,6 +12,8 @@ pub struct Config {
     pub polymarket_private_key: String,
     /// Polygon RPC endpoint used for on-chain ERC20 balance queries
     pub polygon_rpc_url: String,
+    /// Additional Polygon RPC endpoints tried when the primary endpoint fails
+    pub polygon_rpc_fallback_urls: Vec<String>,
     /// Wallet address used for on-chain USDC.e balanceOf calls in paper mode
     pub proxy_wallet: Option<String>,
 
@@ -25,6 +27,8 @@ pub struct Config {
     // ── Feature toggles ─────────────────────────────────────────────────────
     pub enable_telegram: bool,
     pub enable_database: bool,
+    /// Enable ratatui dashboard in foreground (default false for console-only mode)
+    pub enable_tui: bool,
 
     // ── Telegram ──────────────────────────────────────────────────────────────
     pub telegram_bot_token: Option<String>,
@@ -93,7 +97,15 @@ impl Config {
             polymarket_private_key: env::var("POLYMARKET_PRIVATE_KEY")
                 .unwrap_or_else(|_| "PAPER_MODE".into()),
             polygon_rpc_url: env::var("POLYGON_RPC_URL")
-                .unwrap_or_else(|_| "https://polygon-rpc.com".into()),
+                .unwrap_or_else(|_| "https://polygon.publicnode.com".into()),
+            polygon_rpc_fallback_urls: parse_csv_strings(
+                "POLYGON_RPC_FALLBACK_URLS",
+                &[
+                    "https://polygon.drpc.org",
+                    "https://polygon-bor-rpc.publicnode.com",
+                    "https://rpc.ankr.com/polygon",
+                ],
+            )?,
             proxy_wallet: env::var("PROXY_WALLET")
                 .ok()
                 .map(|v| v.trim().to_string())
@@ -114,6 +126,7 @@ impl Config {
             // Feature toggles
             enable_telegram: parse_bool("ENABLE_TELEGRAM", false),
             enable_database: parse_bool("ENABLE_DATABASE", false),
+            enable_tui: parse_bool("ENABLE_TUI", false),
 
             // Telegram
             telegram_bot_token: env::var("TELEGRAM_BOT_TOKEN").ok(),
@@ -194,6 +207,22 @@ fn parse_bool(key: &str, default: bool) -> bool {
         }
         Err(_) => default,
     }
+}
+
+fn parse_csv_strings(key: &str, default: &[&str]) -> Result<Vec<String>> {
+    let raw = env::var(key).unwrap_or_else(|_| default.join(","));
+    let values = raw
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+
+    if values.is_empty() {
+        return Err(anyhow!("{key} cannot be empty"));
+    }
+
+    Ok(values)
 }
 
 fn parse_timeframes(key: &str, default: &[Timeframe]) -> Result<Vec<Timeframe>> {

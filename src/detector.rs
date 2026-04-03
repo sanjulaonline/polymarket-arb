@@ -268,6 +268,8 @@ impl Detector {
             }
         };
 
+        self.risk.note_poly_tick_age_ms(poly_tick_age_ms);
+
         if let (Some(bid), Some(ask)) = (best_bid_prob, best_ask_prob) {
             let spread = (ask - bid).max(0.0);
             if spread > 0.10 {
@@ -280,8 +282,6 @@ impl Detector {
                 return;
             }
         }
-
-        self.risk.note_poly_tick_age_ms(poly_tick_age_ms);
 
         let key = (format!("{:?}", slot.asset), format!("{:?}", slot.timeframe));
         let timeframe_mins = match slot.timeframe { Timeframe::FiveMin => 5, Timeframe::FifteenMin => 15 };

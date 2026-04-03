@@ -41,12 +41,11 @@ impl PolymarketPoller {
                         let spread = (best_ask - best_bid).max(0.0);
                         if spread > 0.10 {
                             debug!(
-                                "[Polymarket/{:?}/{:?}] wide spread {:.4} (>0.10) — skip midpoint tick",
+                                "[Polymarket/{:?}/{:?}] wide spread {:.4} (>0.10) — publish for telemetry only",
                                 self.asset,
                                 self.timeframe,
                                 spread
                             );
-                            continue;
                         }
 
                         let prob = (best_bid + best_ask) / 2.0;

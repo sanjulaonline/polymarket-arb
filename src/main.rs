@@ -15,10 +15,13 @@ mod telegram;
 mod types;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
+use dashmap::DashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
 use tracing::{error, info, warn};
+use url::Url;
 
 use config::Config;
 use dashboard::Dashboard;
@@ -33,7 +36,7 @@ use feeds::{
 use polymarket::{client::PolymarketClient, poller::PolymarketPoller};
 use risk::RiskManager;
 use telegram::Telegram;
-use types::{Asset, PriceTick};
+use types::{Asset, PriceSource, PriceTick, Timeframe};
 
 // ── Midnight reset ────────────────────────────────────────────────────────────
 
@@ -54,8 +57,40 @@ async fn midnight_reset(risk: Arc<RiskManager>, tg: Arc<Telegram>) {
 
 // ── Stats printer ─────────────────────────────────────────────────────────────
 
-async fn stats_printer(risk: Arc<RiskManager>) {
-    let mut iv = tokio::time::interval(tokio::time::Duration::from_secs(60));
+type FeedKey = (PriceSource, Asset, Option<Timeframe>);
+
+fn fmt_tick(
+    latest: &Arc<DashMap<FeedKey, PriceTick>>,
+    source: PriceSource,
+    asset: Asset,
+    timeframe: Option<Timeframe>,
+) -> String {
+    if let Some(t) = latest.get(&(source, asset, timeframe)) {
+        let age_ms = (Utc::now() - t.timestamp).num_milliseconds().max(0);
+        if source == PriceSource::Polymarket {
+            let bid = t
+                .book_best_bid_prob
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_else(|| "na".to_string());
+            let ask = t
+                .book_best_ask_prob
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_else(|| "na".to_string());
+            format!("bid={bid} ask={ask} mid={:.4} age={}ms", t.price, age_ms)
+        } else {
+            format!("{:.2} age={}ms", t.price, age_ms)
+        }
+    } else {
+        "n/a".to_string()
+    }
+}
+
+async fn stats_printer(
+    risk: Arc<RiskManager>,
+    latest: Arc<DashMap<FeedKey, PriceTick>>,
+    tracked_timeframes: Vec<Timeframe>,
+) {
+    let mut iv = tokio::time::interval(tokio::time::Duration::from_secs(10));
     loop {
         iv.tick().await;
         let (pnl, trades, wr, halted) = risk.snapshot();
@@ -71,7 +106,69 @@ async fn stats_printer(risk: Arc<RiskManager>) {
             fallback_count,
             lookup_count
         );
+
+        let btc_binance = fmt_tick(&latest, PriceSource::Binance, Asset::Btc, None);
+        let btc_tv = fmt_tick(&latest, PriceSource::TradingView, Asset::Btc, None);
+        let btc_cq = fmt_tick(&latest, PriceSource::CryptoQuant, Asset::Btc, None);
+        let eth_binance = fmt_tick(&latest, PriceSource::Binance, Asset::Eth, None);
+        let eth_tv = fmt_tick(&latest, PriceSource::TradingView, Asset::Eth, None);
+
+        let poly_parts = tracked_timeframes
+            .iter()
+            .map(|tf| {
+                format!(
+                    "{} {}",
+                    tf,
+                    fmt_tick(&latest, PriceSource::Polymarket, Asset::Btc, Some(*tf))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+
+        info!(
+            "[Tape] BTC(binance={}, tv={}, cq={}) | ETH(binance={}, tv={}) | POLY({})",
+            btc_binance,
+            btc_tv,
+            btc_cq,
+            eth_binance,
+            eth_tv,
+            poly_parts
+        );
     }
+}
+
+fn rpc_endpoint_label(raw: &str) -> String {
+    if let Ok(url) = Url::parse(raw) {
+        if let Some(host) = url.host_str() {
+            return host.to_string();
+        }
+    }
+    raw.to_string()
+}
+
+fn polygon_rpc_candidates(cfg: &Config) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for rpc in std::iter::once(cfg.polygon_rpc_url.as_str())
+        .chain(cfg.polygon_rpc_fallback_urls.iter().map(String::as_str))
+    {
+        let trimmed = rpc.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let key = trimmed.to_ascii_lowercase();
+        if seen.insert(key) {
+            out.push(trimmed.to_string());
+        }
+    }
+
+    if out.is_empty() {
+        out.push("https://polygon.publicnode.com".to_string());
+    }
+
+    out
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -117,30 +214,51 @@ async fn main() -> Result<()> {
         let mut bankroll_set = false;
 
         if let Some(proxy_wallet) = cfg.proxy_wallet.as_deref() {
-            match poly_client
-                .get_usdc_balance_onchain(&cfg.polygon_rpc_url, proxy_wallet)
-                .await
-            {
-                Ok(wallet_balance) if wallet_balance > 0.0 => {
-                    let prev = cfg.portfolio_size_usdc;
-                    cfg.portfolio_size_usdc = wallet_balance;
-                    bankroll_set = true;
-                    info!(
-                        "[Init] Paper bankroll set from Polygon USDC.e balanceOf(PROXY_WALLET): ${:.2} (PORTFOLIO_SIZE_USDC was ${:.2})",
-                        wallet_balance,
-                        prev
-                    );
-                }
-                Ok(_) => {
-                    warn!(
-                        "[Init] Polygon USDC.e balanceOf(PROXY_WALLET) returned zero; trying CLOB balance fallback"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "[Init] Polygon USDC.e balanceOf(PROXY_WALLET) failed: {}. Trying CLOB balance fallback",
-                        e
-                    );
+            let rpc_candidates = polygon_rpc_candidates(&cfg);
+            for (idx, rpc_url) in rpc_candidates.iter().enumerate() {
+                let label = rpc_endpoint_label(rpc_url);
+                match poly_client.get_usdc_balance_onchain(rpc_url, proxy_wallet).await {
+                    Ok(wallet_balance) if wallet_balance > 0.0 => {
+                        let prev = cfg.portfolio_size_usdc;
+                        cfg.portfolio_size_usdc = wallet_balance;
+                        bankroll_set = true;
+                        info!(
+                            "[Init] Paper bankroll set from Polygon USDC.e balanceOf(PROXY_WALLET) via {}: ${:.2} (PORTFOLIO_SIZE_USDC was ${:.2})",
+                            label,
+                            wallet_balance,
+                            prev
+                        );
+                        break;
+                    }
+                    Ok(_) => {
+                        let has_more = idx + 1 < rpc_candidates.len();
+                        if has_more {
+                            warn!(
+                                "[Init] Polygon RPC {} returned zero balance; trying next RPC endpoint",
+                                label
+                            );
+                        } else {
+                            warn!(
+                                "[Init] Polygon RPC {} returned zero balance; trying CLOB balance fallback",
+                                label
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        let has_more = idx + 1 < rpc_candidates.len();
+                        if has_more {
+                            warn!(
+                                "[Init] Polygon RPC {} failed: {}. Trying next RPC endpoint",
+                                label,
+                                e
+                            );
+                        } else {
+                            warn!(
+                                "[Init] Polygon USDC.e balanceOf(PROXY_WALLET) failed on all RPC endpoints: {}. Trying CLOB balance fallback",
+                                e
+                            );
+                        }
+                    }
                 }
             }
         } else {
@@ -355,7 +473,9 @@ async fn main() -> Result<()> {
     }
     {
         let r = risk.clone();
-        handles.push(tokio::spawn(async move { stats_printer(r).await; }));
+        let latest = latest_prices.clone();
+        let tfs = cfg.market_timeframes.clone();
+        handles.push(tokio::spawn(async move { stats_printer(r, latest, tfs).await; }));
     }
 
     // Startup Telegram notification
@@ -367,9 +487,22 @@ async fn main() -> Result<()> {
         ))
         .await;
 
-    // Terminal dashboard (runs in foreground, press q to exit)
-    let dash = Dashboard::new(db.clone(), risk.clone(), cfg.clone());
-    dash.run(shutdown_rx).await?;
+    if cfg.enable_tui {
+        info!("[Runtime] TUI dashboard enabled. Press q/Esc to stop.");
+        let dash = Dashboard::new(db.clone(), risk.clone(), cfg.clone());
+        if let Err(e) = dash.run(shutdown_rx).await {
+            warn!("[Dashboard] failed: {}. Falling back to console mode.", e);
+            info!("[Runtime] Console-only mode active. Press Ctrl+C to stop.");
+            tokio::signal::ctrl_c()
+                .await
+                .context("wait for Ctrl+C")?;
+        }
+    } else {
+        info!("[Runtime] Console-only mode (ENABLE_TUI=false). Press Ctrl+C to stop.");
+        tokio::signal::ctrl_c()
+            .await
+            .context("wait for Ctrl+C")?;
+    }
 
     // Graceful shutdown
     let _ = shutdown_tx.send(true);
