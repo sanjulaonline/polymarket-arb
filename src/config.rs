@@ -1,5 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::env;
+
+use crate::types::Timeframe;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -13,6 +15,8 @@ pub struct Config {
     pub cryptoquant_api_key: String,
     pub tradingview_symbol_btc: String,
     pub tradingview_symbol_eth: String,
+    /// Enabled BTC contract timeframes (e.g. [5m], [15m], or [5m,15m])
+    pub market_timeframes: Vec<Timeframe>,
 
     // ── Feature toggles ─────────────────────────────────────────────────────
     pub enable_telegram: bool,
@@ -92,6 +96,10 @@ impl Config {
                 .unwrap_or_else(|_| "BINANCE:BTCUSDT".into()),
             tradingview_symbol_eth: env::var("TV_SYMBOL_ETH")
                 .unwrap_or_else(|_| "BINANCE:ETHUSDT".into()),
+            market_timeframes: parse_timeframes(
+                "MARKET_TIMEFRAMES",
+                &[Timeframe::FiveMin, Timeframe::FifteenMin],
+            )?,
 
             // Feature toggles
             enable_telegram: parse_bool("ENABLE_TELEGRAM", false),
@@ -176,4 +184,44 @@ fn parse_bool(key: &str, default: bool) -> bool {
         }
         Err(_) => default,
     }
+}
+
+fn parse_timeframes(key: &str, default: &[Timeframe]) -> Result<Vec<Timeframe>> {
+    let raw = env::var(key).unwrap_or_else(|_| {
+        default
+            .iter()
+            .map(|tf| tf.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    });
+
+    let mut out = Vec::new();
+    for part in raw.split(',') {
+        let p = part.trim().to_ascii_lowercase();
+        if p.is_empty() {
+            continue;
+        }
+
+        let tf = match p.as_str() {
+            "5m" | "5" => Timeframe::FiveMin,
+            "15m" | "15" => Timeframe::FifteenMin,
+            _ => {
+                return Err(anyhow!(
+                    "{key} contains invalid timeframe '{part}'. Allowed values: 5m,15m"
+                ));
+            }
+        };
+
+        if !out.contains(&tf) {
+            out.push(tf);
+        }
+    }
+
+    if out.is_empty() {
+        return Err(anyhow!(
+            "{key} cannot be empty. Use one of: 5m, 15m, or 5m,15m"
+        ));
+    }
+
+    Ok(out)
 }

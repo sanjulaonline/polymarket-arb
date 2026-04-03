@@ -33,7 +33,7 @@ use feeds::{
 use polymarket::{client::PolymarketClient, poller::PolymarketPoller};
 use risk::RiskManager;
 use telegram::Telegram;
-use types::{Asset, PriceTick, Timeframe};
+use types::{Asset, PriceTick};
 
 // ── Midnight reset ────────────────────────────────────────────────────────────
 
@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
 
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     info!("  Polymarket Latency Arb Bot  v2.0              ");
-    info!("  BTC | Up/Down 5m+15m | Kelly | Paper-first   ");
+    info!("  BTC | Up/Down configurable TF | Kelly | Paper-first ");
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     let cfg = Config::from_env().context("Config error")?;
@@ -93,6 +93,14 @@ async fn main() -> Result<()> {
     } else {
         info!("📋 PAPER TRADING MODE — no real orders");
     }
+
+    let configured_timeframes = cfg
+        .market_timeframes
+        .iter()
+        .map(|tf| tf.to_string())
+        .collect::<Vec<_>>()
+        .join("+");
+    info!("[Init] Enabled BTC contract timeframes: {}", configured_timeframes);
 
     // Shared services
     let poly_client = Arc::new(PolymarketClient::new(&cfg)?);
@@ -112,63 +120,46 @@ async fn main() -> Result<()> {
         .sum();
     risk.set_open_exposure_usdc(startup_open_exposure);
 
-    // Discover markets — fetch 5m and 15m BTC markets independently
-    info!("[Init] Discovering Polymarket BTC 5m market...");
-    let btc_5m_market = poly_client
-        .get_btc_market_for_timeframe(types::Timeframe::FiveMin)
-        .await
-        .context("Failed to fetch BTC 5m market")?;
-    info!("[Init] BTC 5m: \"{}\"", btc_5m_market.question);
-
-    info!("[Init] Discovering Polymarket BTC 15m market...");
-    let btc_15m_market = poly_client
-        .get_btc_market_for_timeframe(types::Timeframe::FifteenMin)
-        .await
-        .context("Failed to fetch BTC 15m market")?;
-    info!("[Init] BTC 15m: \"{}\"", btc_15m_market.question);
-
-    // Extract YES/NO tokens per timeframe.
+    // Build contract slots from configured timeframes.
     // For up/down markets there is no fixed strike; we use 0.0 as a sentinel.
-    // The detector will substitute the live BTC price as the dynamic reference.
-    let btc_5m_yes = btc_5m_market
-        .tokens.iter().find(|t| t.outcome.to_lowercase() == "yes").cloned()
-        .context("No YES token in BTC 5m market")?;
-    let btc_5m_no = btc_5m_market
-        .tokens.iter().find(|t| t.outcome.to_lowercase() == "no").cloned()
-        .context("No NO token in BTC 5m market")?;
-
-    let btc_15m_yes = btc_15m_market
-        .tokens.iter().find(|t| t.outcome.to_lowercase() == "yes").cloned()
-        .context("No YES token in BTC 15m market")?;
-    let btc_15m_no = btc_15m_market
-        .tokens.iter().find(|t| t.outcome.to_lowercase() == "no").cloned()
-        .context("No NO token in BTC 15m market")?;
-
-    // Build contract slots
+    // The detector uses candle-open price as the timeframe-specific reference.
     let eod_ts = {
         let now = chrono::Utc::now();
         let eod = now.date_naive().and_hms_opt(23, 59, 59).unwrap();
         chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(eod, chrono::Utc).timestamp()
     };
 
-    let contracts = vec![
-        ContractSlot {
+    let mut contracts = Vec::new();
+    for timeframe in &cfg.market_timeframes {
+        info!("[Init] Discovering Polymarket BTC {} market...", timeframe);
+        let market = poly_client
+            .get_btc_market_for_timeframe(*timeframe)
+            .await
+            .with_context(|| format!("Failed to fetch BTC {} market", timeframe))?;
+        info!("[Init] BTC {}: \"{}\"", timeframe, market.question);
+
+        let yes_token = market
+            .tokens
+            .iter()
+            .find(|t| t.outcome.eq_ignore_ascii_case("yes"))
+            .cloned()
+            .with_context(|| format!("No YES token in BTC {} market", timeframe))?;
+        let no_token = market
+            .tokens
+            .iter()
+            .find(|t| t.outcome.eq_ignore_ascii_case("no"))
+            .cloned()
+            .with_context(|| format!("No NO token in BTC {} market", timeframe))?;
+
+        contracts.push(ContractSlot {
             asset: Asset::Btc,
-            timeframe: Timeframe::FiveMin,
-            yes_token: btc_5m_yes,
-            no_token:  btc_5m_no,
-            strike:    0.0, // dynamic — up/down market, reference = live price
+            timeframe: *timeframe,
+            yes_token,
+            no_token,
+            strike: 0.0,
             expiry_ts: eod_ts,
-        },
-        ContractSlot {
-            asset: Asset::Btc,
-            timeframe: Timeframe::FifteenMin,
-            yes_token: btc_15m_yes,
-            no_token:  btc_15m_no,
-            strike:    0.0, // dynamic — up/down market, reference = live price
-            expiry_ts: eod_ts,
-        },
-    ];
+        });
+    }
 
     // Channels
     let (raw_tx, _) = broadcast::channel::<PriceTick>(2048);
@@ -281,7 +272,12 @@ async fn main() -> Result<()> {
 
     // Startup Telegram notification
     let mode_str = if cfg.is_live() { "🔴 LIVE" } else { "📋 PAPER" };
-    let _ = tg.send(&format!("🚀 Bot started | Mode: {mode_str} | Tracking BTC+ETH 5m/15m")).await;
+    let _ = tg
+        .send(&format!(
+            "🚀 Bot started | Mode: {mode_str} | Tracking BTC {} + ETH spot feeds",
+            configured_timeframes
+        ))
+        .await;
 
     // Terminal dashboard (runs in foreground, press q to exit)
     let dash = Dashboard::new(db.clone(), risk.clone(), cfg.clone());

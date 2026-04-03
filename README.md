@@ -92,6 +92,14 @@ cp .env.example .env
 nano .env   # Fill in your keys
 ```
 
+Set candle windows with `MARKET_TIMEFRAMES` in `.env`:
+
+```env
+MARKET_TIMEFRAMES=5m      # only 5-minute contracts
+MARKET_TIMEFRAMES=15m     # only 15-minute contracts
+MARKET_TIMEFRAMES=5m,15m  # both (default)
+```
+
 ### 3. Get Polymarket API credentials
 
 - Go to https://polymarket.com → Profile → API Keys
