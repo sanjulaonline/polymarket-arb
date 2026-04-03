@@ -32,23 +32,16 @@ pub struct Token {
     pub outcome: String,  // "Yes" | "No"
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct OrderBook {
     pub bids: Vec<Level>,
     pub asks: Vec<Level>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct Level {
-    #[serde(deserialize_with = "de_str_f64")]
     pub price: f64,
-    #[serde(deserialize_with = "de_str_f64")]
     pub size: f64,
-}
-
-fn de_str_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
-    let s: &str = serde::Deserialize::deserialize(d)?;
-    s.parse().map_err(serde::de::Error::custom)
 }
 
 /// Mid-price derived from an order book
@@ -178,7 +171,8 @@ impl PolymarketClient {
         let url = format!("{}{}", CLOB_BASE, path);
 
         let resp = self.http.get(&url).send().await.context("GET /book")?;
-        let book: OrderBook = resp.json().await.context("parse /book")?;
+        let payload: Value = resp.json().await.context("parse /book response body")?;
+        let book = parse_order_book(payload).context("parse /book")?;
         Ok(book)
     }
 
@@ -264,4 +258,69 @@ fn parse_markets(payload: Value) -> Result<Vec<Market>> {
     }
 
     Err(anyhow!("Unrecognized /markets payload shape"))
+}
+
+fn parse_order_book(payload: Value) -> Result<OrderBook> {
+    if let Some(err) = payload.get("error").and_then(Value::as_str) {
+        return Err(anyhow!("book unavailable: {err}"));
+    }
+
+    let root = payload
+        .get("book")
+        .or_else(|| payload.get("data"))
+        .and_then(|v| v.get("book").or(Some(v)))
+        .unwrap_or(&payload);
+
+    let bids_v = root
+        .get("bids")
+        .or_else(|| root.get("buy"))
+        .ok_or_else(|| anyhow!("missing bids in /book payload"))?;
+    let asks_v = root
+        .get("asks")
+        .or_else(|| root.get("sell"))
+        .ok_or_else(|| anyhow!("missing asks in /book payload"))?;
+
+    Ok(OrderBook {
+        bids: parse_levels(bids_v).context("parse bids")?,
+        asks: parse_levels(asks_v).context("parse asks")?,
+    })
+}
+
+fn parse_levels(v: &Value) -> Result<Vec<Level>> {
+    let arr = v
+        .as_array()
+        .ok_or_else(|| anyhow!("levels must be an array"))?;
+
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        if let Some(obj) = item.as_object() {
+            let price = parse_num(obj.get("price").or_else(|| obj.get("p")).ok_or_else(|| anyhow!("missing level.price"))?)?;
+            let size = parse_num(obj.get("size").or_else(|| obj.get("s")).ok_or_else(|| anyhow!("missing level.size"))?)?;
+            out.push(Level { price, size });
+            continue;
+        }
+
+        if let Some(tuple) = item.as_array() {
+            if tuple.len() >= 2 {
+                let price = parse_num(&tuple[0])?;
+                let size = parse_num(&tuple[1])?;
+                out.push(Level { price, size });
+                continue;
+            }
+        }
+
+        return Err(anyhow!("unsupported level shape"));
+    }
+
+    Ok(out)
+}
+
+fn parse_num(v: &Value) -> Result<f64> {
+    if let Some(n) = v.as_f64() {
+        return Ok(n);
+    }
+    if let Some(s) = v.as_str() {
+        return s.parse::<f64>().context("invalid numeric string");
+    }
+    Err(anyhow!("value is neither number nor string"))
 }

@@ -15,6 +15,7 @@ mod telegram;
 mod types;
 
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
 use tracing::{error, info, warn};
@@ -185,20 +186,29 @@ async fn main() -> Result<()> {
     }
 
     // CryptoQuant (BTC)
-    if !cfg.cryptoquant_api_key.is_empty() {
+    if !cfg.cryptoquant_api_key.is_empty()
+        && !cfg.cryptoquant_api_key.starts_with("your_")
+        && cfg.cryptoquant_api_key != "REPLACE_ME"
+    {
         let tx = raw_tx.clone();
         let key = cfg.cryptoquant_api_key.clone();
         handles.push(tokio::spawn(async move {
             let feed = CryptoQuantFeed::new(&key, tx);
             if let Err(e) = feed.run().await { error!("[CryptoQuant] fatal: {e}"); }
         }));
+    } else {
+        info!("[CryptoQuant] Disabled (no real API key configured)");
     }
 
     // Polymarket pollers for each contract
+    let mut seen_tokens = HashSet::new();
     for slot in &contracts {
         let client = poly_client.clone();
         let tx = raw_tx.clone();
         let token_id = slot.yes_token.token_id.clone();
+        if !seen_tokens.insert(token_id.clone()) {
+            continue;
+        }
         let asset = slot.asset;
         let strike = slot.strike;
         let poll_ms = cfg.poly_poll_ms;
