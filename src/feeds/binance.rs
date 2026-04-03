@@ -11,7 +11,7 @@ use url::Url;
 
 use crate::types::{Asset, PriceSource, PriceTick};
 
-const BINANCE_WS: &str = "wss://stream.binance.com:9443/stream";
+const BINANCE_WS: &str = "wss://data-stream.binance.com/stream";
 
 #[derive(Debug, Deserialize)]
 struct StreamWrapper {
@@ -66,6 +66,7 @@ impl BinanceFeed {
                             source: PriceSource::Binance,
                             asset,
                             timeframe: None,
+                            book_depth_usdc: None,
                             price,
                             timestamp: Utc::now(),
                         });

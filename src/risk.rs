@@ -16,6 +16,12 @@ pub struct RiskManager {
     kill_switch: Arc<AtomicBool>,
     /// Total notional exposure in open positions (USDC cents)
     open_exposure_cents: Arc<AtomicI64>,
+    /// Last observed age of Polymarket tick used by detector (ms)
+    poly_last_tick_age_ms: Arc<AtomicI64>,
+    /// Number of detector Polymarket lookups (for fallback-rate denominator)
+    poly_lookup_count: Arc<AtomicI64>,
+    /// Number of detector lookups that needed direct fallback polling
+    poly_fallback_count: Arc<AtomicI64>,
 }
 
 impl RiskManager {
@@ -27,6 +33,9 @@ impl RiskManager {
             win_count: Arc::new(AtomicI64::new(0)),
             kill_switch: Arc::new(AtomicBool::new(false)),
             open_exposure_cents: Arc::new(AtomicI64::new(0)),
+            poly_last_tick_age_ms: Arc::new(AtomicI64::new(-1)),
+            poly_lookup_count: Arc::new(AtomicI64::new(0)),
+            poly_fallback_count: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -164,6 +173,33 @@ impl RiskManager {
 
     pub fn open_exposure_usdc(&self) -> f64 {
         self.open_exposure_cents.load(Ordering::Relaxed) as f64 / 100.0
+    }
+
+    /// Track one Polymarket lookup from detector, and whether fallback polling was needed.
+    pub fn note_poly_lookup(&self, used_fallback: bool) {
+        self.poly_lookup_count.fetch_add(1, Ordering::Relaxed);
+        if used_fallback {
+            self.poly_fallback_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Track the age (ms) of the Polymarket quote used by detector.
+    pub fn note_poly_tick_age_ms(&self, age_ms: i64) {
+        self.poly_last_tick_age_ms
+            .store(age_ms.max(0), Ordering::Relaxed);
+    }
+
+    /// Returns (last_tick_age_ms, fallback_rate_pct, fallback_count, lookup_count).
+    pub fn poly_data_metrics(&self) -> (i64, f64, i64, i64) {
+        let last_age_ms = self.poly_last_tick_age_ms.load(Ordering::Relaxed);
+        let lookups = self.poly_lookup_count.load(Ordering::Relaxed).max(0);
+        let fallbacks = self.poly_fallback_count.load(Ordering::Relaxed).max(0);
+        let fallback_rate = if lookups > 0 {
+            fallbacks as f64 / lookups as f64 * 100.0
+        } else {
+            0.0
+        };
+        (last_age_ms, fallback_rate, fallbacks, lookups)
     }
 
     /// Returns (daily_pnl, trade_count, win_rate_pct, halted)

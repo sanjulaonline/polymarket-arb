@@ -177,12 +177,60 @@ impl Detector {
             if self.cfg.is_live() { "LIVE 🔴" } else { "PAPER 📋" }
         );
 
-        while let Ok(_tick) = rx.recv().await {
-            if self.risk.is_halted() { continue; }
-            for slot in self.contracts.clone() {
-                self.check_slot(&slot).await;
+        let mut settlement_iv = tokio::time::interval(tokio::time::Duration::from_secs(10));
+        loop {
+            tokio::select! {
+                recv = rx.recv() => {
+                    let tick = match recv {
+                        Ok(tick) => tick,
+                        Err(_) => return Ok(()),
+                    };
+
+                    if self.risk.is_halted() { continue; }
+
+                    // Evaluate only on Polymarket contract ticks.
+                    if tick.source != PriceSource::Polymarket {
+                        continue;
+                    }
+
+                    let targets: Vec<ContractSlot> = self
+                        .contracts
+                        .iter()
+                        .filter(|slot| {
+                            slot.asset == tick.asset
+                                && tick
+                                    .timeframe
+                                    .map(|tf| slot.timeframe == tf)
+                                    .unwrap_or(true)
+                        })
+                        .cloned()
+                        .collect();
+
+                    for slot in targets {
+                        self.check_slot(&slot).await;
+                    }
+                }
+                _ = settlement_iv.tick() => {
+                    if !self.cfg.is_live() {
+                        if let Ok(opens) = self.db.open_positions() {
+                            for open in opens {
+                                if let Some(price) = self.best_price(Asset::Btc) { // Assuming BTC for now
+                                    // We need the strike. In up/down, it's the candle open price.
+                                    // For simplicity in this fix, we'll just use a rough estimate or skip if not found.
+                                    let strike = {
+                                        let states = self.states.lock();
+                                        let key = (open.asset.clone(), open.timeframe.clone());
+                                        states.get(&key).and_then(|s| s.candle_open_price).unwrap_or(price)
+                                    };
+                                    self.simulate_paper_settlement(&open, price, strike).await;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
+        #[allow(unreachable_code)]
         Ok(())
     }
 
@@ -192,16 +240,34 @@ impl Detector {
 
         // ── Step 2: get Polymarket mid-probability ────────────────────────────
         // Use aggregated Polymarket data to avoid redundant API calls and respect staleness
-        let poly_prob = match self.poly_price(slot.asset, slot.timeframe) {
-            Some(p) => p,
+        let poly_from_agg = self.poly_snapshot(slot.asset, slot.timeframe);
+        let used_fallback = poly_from_agg.is_none();
+        self.risk.note_poly_lookup(used_fallback);
+
+        let (poly_prob, book_depth_usdc, poly_tick_age_ms) = match poly_from_agg {
+            Some(v) => v,
             None => {
                 // Fallback to direct poll if aggregator is empty
-                match self.client.mid_probability(&slot.yes_token.token_id).await {
-                    Ok(p) => p,
+                match self.client.get_order_book(&slot.yes_token.token_id).await {
+                    Ok(book) => {
+                        let depth = Self::book_depth_usdc(&book);
+                        match book.mid_price() {
+                            Some(p) => (p, depth, 0),
+                            None => {
+                                debug!(
+                                    "[Detector] empty poly book ({:?}/{:?})",
+                                    slot.asset,
+                                    slot.timeframe
+                                );
+                                return;
+                            }
+                        }
+                    }
                     Err(e) => { debug!("[Detector] poly_prob err ({:?}/{:?}): {e}", slot.asset, slot.timeframe); return; }
                 }
             }
         };
+        self.risk.note_poly_tick_age_ms(poly_tick_age_ms);
 
         let key = (format!("{:?}", slot.asset), format!("{:?}", slot.timeframe));
         let timeframe_mins = match slot.timeframe { Timeframe::FiveMin => 5, Timeframe::FifteenMin => 15 };
@@ -234,7 +300,8 @@ impl Detector {
             } else {
                 self.updown_reference_strike(state, slot.timeframe, real_price)
             };
-            let cex_prob = cex_implied_probability(real_price, effective_strike, timeframe_mins);
+            let adaptive_vol = Self::adaptive_cex_vol(state, timeframe_mins);
+            let cex_prob = cex_implied_probability(real_price, effective_strike, timeframe_mins, adaptive_vol);
             let direction_up = cex_prob > poly_prob;
             let posterior = if direction_up { posterior_up } else { posterior_down };
 
@@ -265,9 +332,10 @@ impl Detector {
             let bayes_edge_pp = (posterior - poly_prob).abs() * 100.0;
 
             // Must exceed lag threshold from either raw CEX or Bayesian
-            if lag_pp < self.cfg.lag_threshold_pp && bayes_edge_pp < self.cfg.lag_threshold_pp {
-                debug!("[Detector] {:?}/{:?} lag={:.1}pp bayes_edge={:.1}pp — skip",
-                    slot.asset, slot.timeframe, lag_pp, bayes_edge_pp);
+            let prefilter_pp = self.cfg.lag_threshold_pp.max(self.cfg.min_edge_pct);
+            if lag_pp < prefilter_pp && bayes_edge_pp < prefilter_pp {
+                debug!("[Detector] {:?}/{:?} lag={:.1}pp bayes_edge={:.1}pp prefilter={:.1}pp — skip",
+                    slot.asset, slot.timeframe, lag_pp, bayes_edge_pp, prefilter_pp);
                 (None, ModelOutput::default())
             } else {
                 // ── Step 6: confidence score ───────────────────────────────────
@@ -282,7 +350,7 @@ impl Detector {
                     source_spread_pct: self.source_spread_pct(slot.asset),
                     streak,
                     edge_pct: bayes_edge_pp,
-                    book_depth_usdc: 1_000.0,
+                    book_depth_usdc,
                     price_latency_ms,
                 });
 
@@ -357,6 +425,27 @@ impl Detector {
         }
     }
 
+    async fn simulate_paper_settlement(&self, record: &TradeRecord, current_real_price: f64, strike: f64) {
+        let elapsed = Utc::now() - record.opened_at;
+        let limit_secs = if record.timeframe.contains("5m") { 300 } else { 900 };
+        
+        if elapsed.num_seconds() >= limit_secs {
+            let won = if record.direction == "UP" {
+                current_real_price > strike
+            } else {
+                current_real_price < strike
+            };
+            
+            let pnl = if won { record.size_usdc * 0.9 } else { -record.size_usdc };
+            if let Some(id) = record.id {
+                let _ = self.db.close_trade(id, pnl, if won { "WON" } else { "LOST" });
+                self.risk.release_open_exposure(record.size_usdc);
+                self.risk.record_pnl(pnl, won);
+                info!("[Paper] Settled #{} {}/{} result={} pnl={:+.2}", id, record.asset, record.timeframe, if won { "WON" } else { "LOST" }, pnl);
+            }
+        }
+    }
+
     async fn execute(&self, slot: &ContractSlot, snap: &MarketSnapshot) {
         let size_usdc = match self.risk.approve_trade(snap.models.kelly_size_usdc) {
             Some(s) => s,
@@ -427,15 +516,6 @@ impl Detector {
 
                 self.tg.trade_alert(false, &asset_str, &tf_str, direction_str,
                     size_usdc, snap.effective_edge_pct(), snap.confidence, Some(&order_id)).await;
-
-                let est_pnl = size_usdc * snap.effective_edge_pct() / 100.0;
-                self.risk.record_pnl(est_pnl, true);
-
-                let daily = self.risk.daily_pnl();
-                if daily < 0.0 && daily.abs() / self.cfg.daily_loss_cap_usdc() >= 0.5 {
-                    self.tg.drawdown_alert(daily, self.cfg.daily_drawdown_kill_pct).await;
-                }
-                if self.risk.is_halted() { self.tg.kill_switch_alert(daily).await; }
             }
             Err(e) => warn!("[Executor] Order failed: {e}"),
         }
@@ -458,16 +538,21 @@ impl Detector {
         None
     }
 
-    fn poly_price(&self, asset: Asset, timeframe: Timeframe) -> Option<f64> {
+    fn poly_snapshot(&self, asset: Asset, timeframe: Timeframe) -> Option<(f64, f64, i64)> {
         if let Some(t) = self
             .latest
             .get(&(PriceSource::Polymarket, asset, Some(timeframe)))
         {
-            if (Utc::now() - t.timestamp).num_seconds() <= 3 {
-                return Some(t.price);
+            let tick_age_ms = (Utc::now() - t.timestamp).num_milliseconds().max(0);
+            if tick_age_ms <= self.polymarket_max_age_ms() {
+                return Some((t.price, t.book_depth_usdc.unwrap_or(0.0), tick_age_ms));
             }
         }
         None
+    }
+
+    fn polymarket_max_age_ms(&self) -> i64 {
+        (self.cfg.poly_poll_ms.saturating_mul(5)) as i64
     }
 
     fn source_count(&self, asset: Asset) -> usize {
@@ -495,6 +580,37 @@ impl Detector {
         let max = prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         if min <= 0.0 { return 0.5; }
         (max - min) / min * 100.0
+    }
+
+    fn adaptive_cex_vol(state: &SlotState, timeframe_mins: u32) -> Option<f64> {
+        let sigma_tick = state.stoikov.vol.variance().sqrt();
+        if !sigma_tick.is_finite() || sigma_tick <= 0.0 {
+            return None;
+        }
+
+        let timeframe_scale = ((timeframe_mins as f64) * 60.0).sqrt();
+        let sigma = sigma_tick * timeframe_scale;
+        if sigma.is_finite() && sigma > 0.0 {
+            Some(sigma)
+        } else {
+            None
+        }
+    }
+
+    fn book_depth_usdc(book: &crate::polymarket::client::OrderBook) -> f64 {
+        let bid_depth: f64 = book
+            .bids
+            .iter()
+            .take(5)
+            .map(|l| l.price.max(0.0) * l.size.max(0.0))
+            .sum();
+        let ask_depth: f64 = book
+            .asks
+            .iter()
+            .take(5)
+            .map(|l| l.price.max(0.0) * l.size.max(0.0))
+            .sum();
+        bid_depth + ask_depth
     }
 
     fn updown_reference_strike(

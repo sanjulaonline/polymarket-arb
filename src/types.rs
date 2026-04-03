@@ -64,6 +64,8 @@ pub struct PriceTick {
     pub asset: Asset,
     /// Optional contract timeframe discriminator (used by Polymarket 5m vs 15m ticks)
     pub timeframe: Option<Timeframe>,
+    /// Optional notional depth snapshot (USDC), primarily for Polymarket books.
+    pub book_depth_usdc: Option<f64>,
     pub price: f64,
     pub timestamp: DateTime<Utc>,
 }

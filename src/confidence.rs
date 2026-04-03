@@ -82,14 +82,25 @@ pub fn compute_confidence(inp: &ConfidenceInput) -> f64 {
 
 /// Implied probability of an UP move given current price vs. a strike.
 /// Simple logistic function centered at strike.
-pub fn cex_implied_probability(current_price: f64, strike: f64, timeframe_mins: u32) -> f64 {
+///
+/// `observed_vol` is optional realised volatility (fractional sigma for the timeframe).
+/// If absent, a conservative default is used.
+pub fn cex_implied_probability(
+    current_price: f64,
+    strike: f64,
+    timeframe_mins: u32,
+    observed_vol: Option<f64>,
+) -> f64 {
     if !current_price.is_finite() || !strike.is_finite() || strike <= 0.0 {
         return 0.5;
     }
 
     // Volatility estimate: ~0.3% per 5-min window for BTC (empirical)
     let vol_per_min = 0.003 / 5.0_f64.sqrt();
-    let vol = vol_per_min * (timeframe_mins as f64).sqrt();
+    let default_vol = vol_per_min * (timeframe_mins as f64).sqrt();
+    let vol = observed_vol
+        .unwrap_or(default_vol)
+        .clamp(default_vol * 0.2, default_vol * 20.0);
     let denom = (strike * vol).abs().max(1e-9);
 
     // Z-score of strike vs current price

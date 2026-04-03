@@ -91,21 +91,23 @@ impl TradingViewFeed {
             let msg = msg?;
             match msg {
                 Message::Text(text) => {
-                    if text.contains("~h~") {
-                        if let Some(hb) = Self::extract_payload(&text) {
-                            let _ = ws.send(Message::Text(Self::wrap_msg(&hb))).await;
+                    for payload in Self::extract_payloads(&text) {
+                        if payload.starts_with("~h~") {
+                            let _ = ws.send(Message::Text(Self::wrap_msg(&payload))).await;
+                            continue;
                         }
-                        continue;
-                    }
-                    if let Some(price) = self.parse_price(&text) {
-                        debug!("[TradingView/{}] price={:.2}", self.asset, price);
-                        let _ = self.tx.send(PriceTick {
-                            source: PriceSource::TradingView,
-                            asset: self.asset,
-                            timeframe: None,
-                            price,
-                            timestamp: Utc::now(),
-                        });
+
+                        if let Some(price) = self.parse_price_payload(&payload) {
+                            debug!("[TradingView/{}] price={:.2}", self.asset, price);
+                            let _ = self.tx.send(PriceTick {
+                                source: PriceSource::TradingView,
+                                asset: self.asset,
+                                timeframe: None,
+                                book_depth_usdc: None,
+                                price,
+                                timestamp: Utc::now(),
+                            });
+                        }
                     }
                 }
                 Message::Close(_) => return Ok(()),
@@ -168,8 +170,10 @@ impl TradingViewFeed {
         err.to_string().contains("403")
     }
 
-    fn parse_price(&self, raw: &str) -> Option<f64> {
-        let payload = Self::extract_payload(raw)?;
+    fn parse_price_payload(&self, payload: &str) -> Option<f64> {
+        if !payload.starts_with('{') {
+            return None;
+        }
         let v: Value = serde_json::from_str(&payload).ok()?;
         if v.get("m")?.as_str()? != "qsd" { return None; }
         let p = v.get("p")?.as_array()?;
@@ -190,8 +194,35 @@ impl TradingViewFeed {
 
     fn wrap_msg(msg: &str) -> String { format!("~m~{}~m~{}", msg.len(), msg) }
 
-    fn extract_payload(raw: &str) -> Option<String> {
-        let parts: Vec<&str> = raw.split("~m~").collect();
-        parts.get(3).map(|s| s.to_string()).or_else(|| parts.get(2).map(|s| s.to_string()))
+    fn extract_payloads(raw: &str) -> Vec<String> {
+        let mut payloads = Vec::new();
+        let mut rest = raw;
+
+        while let Some(start) = rest.find("~m~") {
+            let after_start = &rest[start + 3..];
+            let Some(len_sep) = after_start.find("~m~") else {
+                break;
+            };
+
+            let len_str = &after_start[..len_sep];
+            let Ok(msg_len) = len_str.parse::<usize>() else {
+                break;
+            };
+
+            let payload_start = len_sep + 3;
+            if after_start.len() < payload_start + msg_len {
+                break;
+            }
+
+            let payload = &after_start[payload_start..payload_start + msg_len];
+            payloads.push(payload.to_string());
+            rest = &after_start[payload_start + msg_len..];
+        }
+
+        if payloads.is_empty() {
+            payloads.push(raw.to_string());
+        }
+
+        payloads
     }
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
-use super::client::PolymarketClient;
+use super::client::{OrderBook, PolymarketClient};
 use crate::types::{Asset, PriceSource, PriceTick, Timeframe};
 
 pub struct PolymarketPoller {
@@ -34,26 +34,53 @@ impl PolymarketPoller {
             tokio::time::interval(tokio::time::Duration::from_millis(self.interval_ms));
         loop {
             interval.tick().await;
-            // For up/down markets the YES-token mid-probability is the signal (0.0–1.0).
-            // We don't derive a dollar price here — the Detector fetches poly_prob itself.
-            // This poller feeds the Aggregator only for cross-source latency tracking.
-            match self.client.mid_probability(&self.token_id).await {
-                Ok(prob) => {
-                    debug!("[Polymarket/{:?}] mid_prob={:.4}", self.asset, prob);
-                    // Emit prob scaled to a nominal dollar range so PriceTick.price
-                    // stays comparable when the aggregator logs spread across sources.
-                    // The detector always re-fetches poly_prob directly from the book.
-                    let _ = self.tx.send(PriceTick {
-                        source: PriceSource::Polymarket,
-                        asset: self.asset,
-                        timeframe: Some(self.timeframe),
-                        price: prob, // raw probability in [0, 1]
-                        timestamp: Utc::now(),
-                    });
+            // Pull the full book once: derive both mid probability and depth from it.
+            match self.client.get_order_book(&self.token_id).await {
+                Ok(book) => {
+                    if let Some(prob) = book.mid_price() {
+                        let depth = Self::top_book_depth_usdc(&book);
+                        debug!(
+                            "[Polymarket/{:?}/{:?}] mid_prob={:.4} depth=${:.2}",
+                            self.asset,
+                            self.timeframe,
+                            prob,
+                            depth
+                        );
+                        let _ = self.tx.send(PriceTick {
+                            source: PriceSource::Polymarket,
+                            asset: self.asset,
+                            timeframe: Some(self.timeframe),
+                            book_depth_usdc: Some(depth),
+                            price: prob,
+                            timestamp: Utc::now(),
+                        });
+                    } else {
+                        warn!(
+                            "[Polymarket/{:?}/{:?}] empty book (no mid)",
+                            self.asset,
+                            self.timeframe
+                        );
+                    }
                 }
-                Err(e) => warn!("[Polymarket/{:?}] poll error: {e}", self.asset),
+                Err(e) => warn!("[Polymarket/{:?}/{:?}] poll error: {e}", self.asset, self.timeframe),
             }
         }
+    }
+
+    fn top_book_depth_usdc(book: &OrderBook) -> f64 {
+        let bid_depth: f64 = book
+            .bids
+            .iter()
+            .take(5)
+            .map(|l| l.price.max(0.0) * l.size.max(0.0))
+            .sum();
+        let ask_depth: f64 = book
+            .asks
+            .iter()
+            .take(5)
+            .map(|l| l.price.max(0.0) * l.size.max(0.0))
+            .sum();
+        bid_depth + ask_depth
     }
 }
 

@@ -82,6 +82,7 @@ impl CryptoQuantFeed {
                             source: PriceSource::CryptoQuant,
                             asset: Asset::Btc,
                             timeframe: None,
+                            book_depth_usdc: None,
                             price,
                             timestamp: Utc::now(),
                         });

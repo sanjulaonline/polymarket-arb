@@ -108,19 +108,33 @@ impl Dashboard {
         let stats_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
+                Constraint::Percentage(20),
+                Constraint::Percentage(20),
+                Constraint::Percentage(20),
+                Constraint::Percentage(20),
+                Constraint::Percentage(20),
             ])
             .split(chunks[1]);
 
         let (daily_pnl, trade_count, win_rate, halted) = self.risk.snapshot();
         let (_db_pnl, db_trades, db_wins) = self.db.today_stats().unwrap_or((0.0, 0, 0));
+        let (poly_age_ms, poly_fallback_rate, _poly_fallbacks, poly_lookups) = self.risk.poly_data_metrics();
 
         let pnl_color = if daily_pnl >= 0.0 { Color::Green } else { Color::Red };
         let halted_str = if halted { " ⛔ HALTED" } else { " ✓ RUNNING" };
         let halted_color = if halted { Color::Red } else { Color::Green };
+        let poly_age_str = if poly_lookups > 0 && poly_age_ms >= 0 {
+            format!("{}ms", poly_age_ms)
+        } else {
+            "n/a".to_string()
+        };
+        let poly_color = if poly_fallback_rate >= 30.0 {
+            Color::Red
+        } else if poly_fallback_rate >= 10.0 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
 
         let stat_widgets = [
             (
@@ -142,6 +156,11 @@ impl Dashboard {
                 "Status",
                 halted_str.to_string(),
                 halted_color,
+            ),
+            (
+                "Poly Data",
+                format!("{} | {:.1}% fb", poly_age_str, poly_fallback_rate),
+                poly_color,
             ),
         ];
 

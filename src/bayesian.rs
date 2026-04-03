@@ -104,7 +104,7 @@ impl BayesianEstimator {
             strike,
             observations: VecDeque::with_capacity(200),
             half_life_secs,
-            min_observations: 3,
+            min_observations: 1,
             prior_alpha: alpha,
             prior_beta: beta,
         }

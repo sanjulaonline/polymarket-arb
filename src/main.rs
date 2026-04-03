@@ -59,9 +59,17 @@ async fn stats_printer(risk: Arc<RiskManager>) {
     loop {
         iv.tick().await;
         let (pnl, trades, wr, halted) = risk.snapshot();
+        let (poly_age_ms, fallback_rate, fallback_count, lookup_count) = risk.poly_data_metrics();
         info!(
-            "[Stats] daily_pnl={:+.2} | trades={} | win_rate={:.1}% | halted={}",
-            pnl, trades, wr, halted
+            "[Stats] daily_pnl={:+.2} | trades={} | win_rate={:.1}% | halted={} | poly_tick_age_ms={} | poly_fallback={:.1}% ({}/{})",
+            pnl,
+            trades,
+            wr,
+            halted,
+            poly_age_ms,
+            fallback_rate,
+            fallback_count,
+            lookup_count
         );
     }
 }

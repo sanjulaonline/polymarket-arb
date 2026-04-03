@@ -62,12 +62,12 @@ impl PriceAggregator {
         None
     }
 
-    /// Latest Polymarket implied price for (`asset`, `timeframe`).
-    pub fn poly_price(&self, asset: Asset, timeframe: Timeframe) -> Option<f64> {
+    /// Latest Polymarket implied price for (`asset`, `timeframe`) within `max_age_ms`.
+    pub fn poly_price(&self, asset: Asset, timeframe: Timeframe, max_age_ms: i64) -> Option<f64> {
         let t = self
             .latest
             .get(&(PriceSource::Polymarket, asset, Some(timeframe)))?;
-        if (Utc::now() - t.timestamp).num_seconds() <= 3 {
+        if (Utc::now() - t.timestamp).num_milliseconds() <= max_age_ms {
             Some(t.price)
         } else {
             None

@@ -7,14 +7,22 @@ use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::types::Timeframe;
 
 const CLOB_BASE: &str = "https://clob.polymarket.com";
+const SERVER_TIME_RESYNC_SECS: i64 = 30;
 
 type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Debug, Default)]
+struct TimeSyncCache {
+    offset_secs: i64,
+    last_sync_local_ts: i64,
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -141,6 +149,7 @@ pub struct PolymarketClient {
     api_key: String,
     api_secret: String,
     passphrase: String,
+    time_sync: Mutex<TimeSyncCache>,
 }
 
 impl PolymarketClient {
@@ -153,6 +162,7 @@ impl PolymarketClient {
             api_key: cfg.polymarket_api_key.clone(),
             api_secret: cfg.polymarket_api_secret.clone(),
             passphrase: cfg.polymarket_api_passphrase.clone(),
+            time_sync: Mutex::new(TimeSyncCache::default()),
         })
     }
 
@@ -167,23 +177,7 @@ impl PolymarketClient {
     }
 
     async fn auth_headers(&self, method: &str, path: &str, body: &str) -> Vec<(String, String)> {
-        let local_ts = Utc::now().timestamp();
-        let ts = match self.fetch_server_time().await {
-            Ok(server_ts) => {
-                let skew = server_ts - local_ts;
-                if skew.abs() > 300 {
-                    warn!(
-                        "[Client] Large local/server time skew detected ({}s); using server timestamp",
-                        skew
-                    );
-                }
-                server_ts
-            }
-            Err(e) => {
-                debug!("[Client] Failed to fetch server time: {e}; falling back to local clock");
-                local_ts
-            }
-        };
+        let ts = self.auth_timestamp().await;
 
         let sig = self.sign(ts, method, path, body);
         vec![
@@ -192,6 +186,47 @@ impl PolymarketClient {
             ("POLY-TIMESTAMP".to_string(), ts.to_string()),
             ("POLY-PASSPHRASE".to_string(), self.passphrase.clone()),
         ]
+    }
+
+    async fn auth_timestamp(&self) -> i64 {
+        let local_ts = Utc::now().timestamp();
+
+        {
+            let cache = self.time_sync.lock().await;
+            if local_ts.saturating_sub(cache.last_sync_local_ts) <= SERVER_TIME_RESYNC_SECS {
+                return local_ts + cache.offset_secs;
+            }
+        }
+
+        match self.fetch_server_time().await {
+            Ok(server_ts) => {
+                let offset = server_ts - local_ts;
+                if offset.abs() > 300 {
+                    warn!(
+                        "[Client] Large local/server time skew detected ({}s); using cached server offset",
+                        offset
+                    );
+                }
+
+                let mut cache = self.time_sync.lock().await;
+                cache.offset_secs = offset;
+                cache.last_sync_local_ts = local_ts;
+                local_ts + offset
+            }
+            Err(e) => {
+                debug!(
+                    "[Client] Failed to refresh server time: {e}; using cached offset if available"
+                );
+                let mut cache = self.time_sync.lock().await;
+                let had_sync = cache.last_sync_local_ts != 0;
+                cache.last_sync_local_ts = local_ts;
+                if had_sync {
+                    local_ts + cache.offset_secs
+                } else {
+                    local_ts
+                }
+            }
+        }
     }
 
     async fn fetch_server_time(&self) -> Result<i64> {
@@ -487,13 +522,6 @@ impl PolymarketClient {
     pub async fn mid_probability(&self, token_id: &str) -> Result<f64> {
         let book = self.get_order_book(token_id).await?;
         book.mid_price().ok_or_else(|| anyhow!("Empty order book for {}", token_id))
-    }
-
-    /// Implied BTC price from a YES token's mid-price.
-    pub async fn implied_btc_price(&self, token_id: &str, strike: f64) -> Result<f64> {
-        let mid = self.mid_probability(token_id).await?;
-        let implied = strike * (1.0 + (mid - 0.5) * 0.02);
-        Ok(implied)
     }
 
     /// Place a Fill-or-Kill order. Returns order id on success.
