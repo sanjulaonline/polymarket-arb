@@ -1,42 +1,42 @@
-/// Avellaneda-Stoikov Market-Making Model
-/// ========================================
-///
-/// Originally derived from:
-///   Avellaneda, M. & Stoikov, S. (2008).
-///   "High-frequency trading in a limit order book."
-///   Quantitative Finance, 8(3), 217–224.
-///
-/// In the original paper, a market maker posts bid/ask quotes around a
-/// *reservation price* that accounts for their current inventory and the
-/// risk of holding that inventory until the market closes.
-///
-/// ## Key formula
-///
-///   Reservation price:    r = s − q·γ·σ²·(T − t)
-///
-///   where:
-///     s   = current mid price (in probability space 0–1)
-///     q   = net inventory  (positive = long YES, negative = long NO)
-///     γ   = risk-aversion coefficient (calibrated, typically 0.1–1.0)
-///     σ²  = variance of the underlying asset per unit time
-///     T−t = time remaining until contract expiry (in years, typically tiny)
-///
-///   Optimal half-spread:  δ = γ·σ²·(T−t) / 2 + (1/γ)·ln(1 + γ/κ)
-///
-///   where κ is the order-arrival rate (liquidity parameter).
-///
-/// ## How we use it in an arb context (not pure market-making)
-///
-/// We don't post limit orders. Instead we use the reservation price as
-/// our *inventory-adjusted fair value*. The decision rule is:
-///
-///   If market_ask < r  → buy is favourable (market underprices vs our fair value)
-///   If market_bid > r  → sell / fade is favourable
-///   |r - market_mid| must also exceed the minimum edge threshold
-///
-/// This prevents the bot from buying into a position it already holds
-/// heavily (inventory-neutral discipline) and skews quoting dynamically
-/// as inventory accumulates.
+//! Avellaneda-Stoikov Market-Making Model
+//! ========================================
+//!
+//! Originally derived from:
+//!   Avellaneda, M. & Stoikov, S. (2008).
+//!   "High-frequency trading in a limit order book."
+//!   Quantitative Finance, 8(3), 217–224.
+//!
+//! In the original paper, a market maker posts bid/ask quotes around a
+//! *reservation price* that accounts for their current inventory and the
+//! risk of holding that inventory until the market closes.
+//!
+//! ## Key formula
+//!
+//!   Reservation price:    r = s − q·γ·σ²·(T − t)
+//!
+//!   where:
+//!     s   = current mid price (in probability space 0–1)
+//!     q   = net inventory  (positive = long YES, negative = long NO)
+//!     γ   = risk-aversion coefficient (calibrated, typically 0.1–1.0)
+//!     σ²  = variance of the underlying asset per unit time
+//!     T−t = time remaining until contract expiry (in years, typically tiny)
+//!
+//!   Optimal half-spread:  δ = γ·σ²·(T−t) / 2 + (1/γ)·ln(1 + γ/κ)
+//!
+//!   where κ is the order-arrival rate (liquidity parameter).
+//!
+//! ## How we use it in an arb context (not pure market-making)
+//!
+//! We don't post limit orders. Instead we use the reservation price as
+//! our *inventory-adjusted fair value*. The decision rule is:
+//!
+//!   If market_ask < r  → buy is favourable (market underprices vs our fair value)
+//!   If market_bid > r  → sell / fade is favourable
+//!   |r - market_mid| must also exceed the minimum edge threshold
+//!
+//! This prevents the bot from buying into a position it already holds
+//! heavily (inventory-neutral discipline) and skews quoting dynamically
+//! as inventory accumulates.
 
 use tracing::debug;
 
@@ -388,7 +388,8 @@ mod tests {
         let mut vol = VolatilityEstimator::new(50);
         let mut prev = 100.0;
         for i in 0..30 {
-            let cur = prev * (1.0 + 0.001);
+            // Add fluctuation so variance is not perfectly zero
+            let cur = prev * (1.0 + 0.001 * (i % 2) as f64);
             vol.add_price(cur, prev);
             prev = cur;
         }

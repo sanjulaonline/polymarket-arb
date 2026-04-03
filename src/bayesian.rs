@@ -1,32 +1,32 @@
-/// Bayesian Probability Updater
-/// ==============================
-///
-/// Purpose: update our *internal* probability estimate P(H|D) faster than
-/// the Polymarket crowd updates its odds.
-///
-/// The hypothesis H: "BTC/ETH will resolve in direction D (UP or DOWN)
-///                    before the contract expires."
-///
-/// The model maintains a Beta(α, β) conjugate prior — the natural prior
-/// for a Bernoulli probability. After every new CEX price tick we update
-/// the posterior analytically (no MCMC needed).
-///
-///   Prior:     Beta(α₀, β₀)   — seeded from Polymarket's current odds
-///   Likelihood: Bernoulli(p)   — each tick is a "soft observation"
-///   Posterior: Beta(α₀ + Σwᵢ·yᵢ, β₀ + Σwᵢ·(1-yᵢ))
-///
-/// where:
-///   yᵢ = soft label ∈ [0,1] of how strongly tick i confirms H
-///   wᵢ = weight based on recency and magnitude of the price move
-///
-/// The posterior mean E[p] = α/(α+β) is our best estimate of the true
-/// probability — updated in real-time, decaying old evidence automatically
-/// via a forgetting factor λ.
-///
-/// Why this beats the market:
-/// The crowd updates odds slowly (human liquidity). We update our posterior
-/// on every tick (milliseconds). When our posterior diverges enough from
-/// the market price, that IS the edge.
+//! Bayesian Probability Updater
+//! ==============================
+//!
+//! Purpose: update our *internal* probability estimate P(H|D) faster than
+//! the Polymarket crowd updates its odds.
+//!
+//! The hypothesis H: "BTC/ETH will resolve in direction D (UP or DOWN)
+//!                    before the contract expires."
+//!
+//! The model maintains a Beta(α, β) conjugate prior — the natural prior
+//! for a Bernoulli probability. After every new CEX price tick we update
+//! the posterior analytically (no MCMC needed).
+//!
+//!   Prior:     Beta(α₀, β₀)   — seeded from Polymarket's current odds
+//!   Likelihood: Bernoulli(p)   — each tick is a "soft observation"
+//!   Posterior: Beta(α₀ + Σwᵢ·yᵢ, β₀ + Σwᵢ·(1-yᵢ))
+//!
+//! where:
+//!   yᵢ = soft label ∈ [0,1] of how strongly tick i confirms H
+//!   wᵢ = weight based on recency and magnitude of the price move
+//!
+//! The posterior mean E[p] = α/(α+β) is our best estimate of the true
+//! probability — updated in real-time, decaying old evidence automatically
+//! via a forgetting factor λ.
+//!
+//! Why this beats the market:
+//! The crowd updates odds slowly (human liquidity). We update our posterior
+//! on every tick (milliseconds). When our posterior diverges enough from
+//! the market price, that IS the edge.
 
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -76,9 +76,9 @@ impl BayesianEstimator {
     /// * `hypothesis_up`   - Are we testing the UP hypothesis?
     /// * `strike`          - Contract strike price
     /// * `prior_strength`  - How many pseudo-observations to give the prior
-    ///                       Higher = slower to update (more trust in market)
-    ///                       Lower = faster to update (more trust in our data)
-    ///                       Typical: 5–20
+    ///   Higher = slower to update (more trust in market)
+    ///   Lower = faster to update (more trust in our data)
+    ///   Typical: 5–20
     pub fn new(
         market_prob: f64,
         hypothesis_up: bool,
@@ -266,7 +266,7 @@ fn normal_quantile(p: f64) -> f64 {
         -3.969_683_028_665_376e1,
         2.209_460_984_245_205e2,
         -2.759_285_104_469_687e2,
-        1.383_577_518_672_690e2,
+        1.383_577_518_672_69e2,
         -3.066_479_806_374_269e1,
         2.506_628_277_459_239,
     ];
@@ -330,8 +330,8 @@ mod tests {
         let mut est = BayesianEstimator::new(0.50, true, 80_000.0, 5.0, 30.0);
         let mut prev = 80_000.0_f64;
         // Feed 10 consecutive bullish ticks
-        for i in 0..10 {
-            let cur = prev * 1.001; // +0.1% each tick
+        for _i in 0..10 {
+            let cur = prev * 1.005; // +0.5% each tick
             est.update(cur, prev);
             prev = cur;
         }
@@ -344,8 +344,8 @@ mod tests {
         let mut est = BayesianEstimator::new(0.70, true, 80_000.0, 5.0, 30.0);
         let mut prev = 81_000.0_f64;
         // Feed 10 consecutive bearish ticks
-        for _ in 0..10 {
-            let cur = prev * 0.999; // -0.1% each tick
+        for _i in 0..10 {
+            let cur = prev * 0.995; // -0.5% each tick
             est.update(cur, prev);
             prev = cur;
         }

@@ -52,6 +52,7 @@ impl Telegram {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn trade_alert(
         &self,
         paper: bool,

@@ -6,11 +6,11 @@ use chrono::Utc;
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::Sha256;
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
+use crate::types::Timeframe;
 
 const CLOB_BASE: &str = "https://clob.polymarket.com";
 
@@ -23,7 +23,17 @@ pub struct Market {
     pub condition_id: String,
     pub question: String,
     pub tokens: Vec<Token>,
+    #[serde(default)]
     pub active: bool,
+    #[serde(default)]
+    pub closed: bool,
+}
+
+/// Paginated response from GET /markets
+#[derive(Debug, Deserialize)]
+struct MarketsPage {
+    data: Vec<Market>,
+    next_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -32,16 +42,23 @@ pub struct Token {
     pub outcome: String,  // "Yes" | "No"
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 pub struct OrderBook {
     pub bids: Vec<Level>,
     pub asks: Vec<Level>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Level {
+    #[serde(deserialize_with = "de_str_f64")]
     pub price: f64,
+    #[serde(deserialize_with = "de_str_f64")]
     pub size: f64,
+}
+
+fn de_str_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    let s: &str = serde::Deserialize::deserialize(d)?;
+    s.parse().map_err(serde::de::Error::custom)
 }
 
 /// Mid-price derived from an order book
@@ -142,27 +159,131 @@ impl PolymarketClient {
 
     /// Fetch active BTC end-of-day markets. Returns the first active one.
     pub async fn get_btc_market(&self) -> Result<Market> {
+        self.search_markets(&["bitcoin", "btc"], |m| {
+            m.active
+                && (m.question.to_lowercase().contains("btc")
+                    || m.question.to_lowercase().contains("bitcoin"))
+        })
+        .await
+    }
+
+    /// Fetch the active BTC "up or down" market for the given timeframe.
+    ///
+    /// Polymarket titles look like:
+    ///   "Will BTC be up 5 minutes from now?"
+    ///   "Will BTC be up 15 minutes from now?"
+    pub async fn get_btc_market_for_timeframe(&self, tf: Timeframe) -> Result<Market> {
+        let minute_str = match tf {
+            Timeframe::FiveMin    => "5",
+            Timeframe::FifteenMin => "15",
+        };
+
+        info!(
+            "[Client] Searching Polymarket for BTC {} minute market...",
+            minute_str
+        );
+
+        self.search_markets(&["bitcoin", "btc"], |m| {
+            if !m.active || m.closed {
+                return false;
+            }
+            let q = m.question.to_lowercase();
+            // Must mention btc/bitcoin
+            let is_btc = q.contains("btc") || q.contains("bitcoin");
+            // Must be an up/down (directional) market for the right window
+            // Accept patterns: "5 minutes", "5 min", "5-minute", etc.
+            let minutes_pattern = format!("{} min", minute_str);
+            let minutes_pattern2 = format!("{}-min", minute_str);
+            let minutes_pattern3 = format!("{} minute", minute_str);
+            let is_correct_window = q.contains(&minutes_pattern)
+                || q.contains(&minutes_pattern2)
+                || q.contains(&minutes_pattern3);
+            // Must be directional (up | down | higher | lower)
+            let is_directional = q.contains(" up") || q.contains(" down")
+                || q.contains("higher") || q.contains("lower");
+
+            is_btc && is_correct_window && is_directional
+        })
+        .await
+        .with_context(|| format!("No active BTC {}m up/down market found", minute_str))
+    }
+
+    /// Paginate through GET /markets with bitcoin tag, applying `pred` to each market.
+    /// Returns the first market matching the predicate, or an error.
+    async fn search_markets<F>(&self, _tags: &[&str], pred: F) -> Result<Market>
+    where
+        F: Fn(&Market) -> bool,
+    {
         let path = "/markets";
         let url = format!("{}{}", CLOB_BASE, path);
+        let mut cursor: Option<String> = None;
+        let mut page_n = 0usize;
 
-        let resp = self
-            .http
-            .get(&url)
-            .query(&[("tag", "bitcoin"), ("active", "true")])
-            .send()
-            .await
-            .context("GET /markets failed")?;
+        loop {
+            page_n += 1;
+            let mut query = vec![
+                ("tag".to_string(), "bitcoin".to_string()),
+                ("active".to_string(), "true".to_string()),
+                ("limit".to_string(), "100".to_string()),
+            ];
+            if let Some(ref c) = cursor {
+                query.push(("next_cursor".to_string(), c.clone()));
+            }
 
-        let payload: Value = resp.json().await.context("parse /markets response")?;
-        let markets = parse_markets(payload).context("extract markets from /markets response")?;
-        markets
-            .into_iter()
-            .find(|m| {
-                m.active
-                    && (m.question.to_lowercase().contains("btc")
-                        || m.question.to_lowercase().contains("bitcoin"))
-            })
-            .ok_or_else(|| anyhow!("No active BTC market found"))
+            debug!("[Client] GET /markets page {} cursor={:?}", page_n, cursor);
+
+            let resp = self
+                .http
+                .get(&url)
+                .query(&query)
+                .send()
+                .await
+                .context("GET /markets request failed")?;
+
+            let status = resp.status();
+            let body = resp.text().await.context("reading /markets response body")?;
+
+            // The CLOB API returns either a paginated object or a bare array.
+            // Try paginated first, fall back to bare array.
+            let (markets, next) = if let Ok(page) =
+                serde_json::from_str::<MarketsPage>(&body)
+            {
+                (page.data, page.next_cursor)
+            } else if let Ok(arr) = serde_json::from_str::<Vec<Market>>(&body) {
+                (arr, None)
+            } else {
+                return Err(anyhow!(
+                    "Failed to parse /markets response (HTTP {}): {}",
+                    status,
+                    &body[..body.len().min(300)]
+                ));
+            };
+
+            debug!("[Client] page {} returned {} markets", page_n, markets.len());
+
+            for m in markets {
+                if pred(&m) {
+                    info!(
+                        "[Client] Found matching market on page {}: \"{}\"",
+                        page_n, m.question
+                    );
+                    return Ok(m);
+                }
+            }
+
+            match next {
+                Some(c) if !c.is_empty() && c != "LTE=" => cursor = Some(c),
+                _ => break,
+            }
+
+            // Safety cap: don't loop forever
+            if page_n >= 20 {
+                warn!("[Client] Reached page limit (20) without finding a matching market");
+                break;
+            }
+        }
+
+        Err(anyhow!("No matching market found after {} pages", page_n))
     }
 
     /// Fetch order book for a token.
@@ -171,8 +292,7 @@ impl PolymarketClient {
         let url = format!("{}{}", CLOB_BASE, path);
 
         let resp = self.http.get(&url).send().await.context("GET /book")?;
-        let payload: Value = resp.json().await.context("parse /book response body")?;
-        let book = parse_order_book(payload).context("parse /book")?;
+        let book: OrderBook = resp.json().await.context("parse /book")?;
         Ok(book)
     }
 
@@ -229,98 +349,4 @@ impl PolymarketClient {
         }
         Ok(())
     }
-}
-
-fn parse_markets(payload: Value) -> Result<Vec<Market>> {
-    if payload.is_array() {
-        let markets: Vec<Market> = serde_json::from_value(payload)
-            .context("expected /markets array payload")?;
-        return Ok(markets);
-    }
-
-    if let Some(v) = payload.get("markets") {
-        let markets: Vec<Market> = serde_json::from_value(v.clone())
-            .context("expected object payload with markets[]")?;
-        return Ok(markets);
-    }
-
-    if let Some(v) = payload.get("data") {
-        if v.is_array() {
-            let markets: Vec<Market> = serde_json::from_value(v.clone())
-                .context("expected object payload with data[]")?;
-            return Ok(markets);
-        }
-        if let Some(markets_v) = v.get("markets") {
-            let markets: Vec<Market> = serde_json::from_value(markets_v.clone())
-                .context("expected object payload with data.markets[]")?;
-            return Ok(markets);
-        }
-    }
-
-    Err(anyhow!("Unrecognized /markets payload shape"))
-}
-
-fn parse_order_book(payload: Value) -> Result<OrderBook> {
-    if let Some(err) = payload.get("error").and_then(Value::as_str) {
-        return Err(anyhow!("book unavailable: {err}"));
-    }
-
-    let root = payload
-        .get("book")
-        .or_else(|| payload.get("data"))
-        .and_then(|v| v.get("book").or(Some(v)))
-        .unwrap_or(&payload);
-
-    let bids_v = root
-        .get("bids")
-        .or_else(|| root.get("buy"))
-        .ok_or_else(|| anyhow!("missing bids in /book payload"))?;
-    let asks_v = root
-        .get("asks")
-        .or_else(|| root.get("sell"))
-        .ok_or_else(|| anyhow!("missing asks in /book payload"))?;
-
-    Ok(OrderBook {
-        bids: parse_levels(bids_v).context("parse bids")?,
-        asks: parse_levels(asks_v).context("parse asks")?,
-    })
-}
-
-fn parse_levels(v: &Value) -> Result<Vec<Level>> {
-    let arr = v
-        .as_array()
-        .ok_or_else(|| anyhow!("levels must be an array"))?;
-
-    let mut out = Vec::with_capacity(arr.len());
-    for item in arr {
-        if let Some(obj) = item.as_object() {
-            let price = parse_num(obj.get("price").or_else(|| obj.get("p")).ok_or_else(|| anyhow!("missing level.price"))?)?;
-            let size = parse_num(obj.get("size").or_else(|| obj.get("s")).ok_or_else(|| anyhow!("missing level.size"))?)?;
-            out.push(Level { price, size });
-            continue;
-        }
-
-        if let Some(tuple) = item.as_array() {
-            if tuple.len() >= 2 {
-                let price = parse_num(&tuple[0])?;
-                let size = parse_num(&tuple[1])?;
-                out.push(Level { price, size });
-                continue;
-            }
-        }
-
-        return Err(anyhow!("unsupported level shape"));
-    }
-
-    Ok(out)
-}
-
-fn parse_num(v: &Value) -> Result<f64> {
-    if let Some(n) = v.as_f64() {
-        return Ok(n);
-    }
-    if let Some(s) = v.as_str() {
-        return s.parse::<f64>().context("invalid numeric string");
-    }
-    Err(anyhow!("value is neither number nor string"))
 }

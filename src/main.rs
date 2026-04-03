@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
 
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     info!("  Polymarket Latency Arb Bot  v2.0              ");
-    info!("  BTC+ETH | 5m+15m | Kelly | Paper-first       ");
+    info!("  BTC | Up/Down 5m+15m | Kelly | Paper-first   ");
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     let cfg = Config::from_env().context("Config error")?;
@@ -104,20 +104,39 @@ async fn main() -> Result<()> {
     ));
     let db = Arc::new(Database::open("trades.db", cfg.enable_database)?);
 
-    // Discover markets
-    info!("[Init] Discovering Polymarket markets...");
-    let btc_market = poly_client.get_btc_market().await
-        .context("Failed to fetch BTC market")?;
-    info!("[Init] BTC market: \"{}\"", btc_market.question);
+    // Discover markets — fetch 5m and 15m BTC markets independently
+    info!("[Init] Discovering Polymarket BTC 5m market...");
+    let btc_5m_market = poly_client
+        .get_btc_market_for_timeframe(types::Timeframe::FiveMin)
+        .await
+        .context("Failed to fetch BTC 5m market")?;
+    info!("[Init] BTC 5m: \"{}\"", btc_5m_market.question);
 
-    let btc_yes = btc_market.tokens.iter().find(|t| t.outcome.to_lowercase() == "yes").cloned()
-        .context("No BTC YES token")?;
-    let btc_no = btc_market.tokens.iter().find(|t| t.outcome.to_lowercase() == "no").cloned()
-        .context("No BTC NO token")?;
-    let btc_strike = extract_strike(&btc_market.question).unwrap_or(80_000.0);
+    info!("[Init] Discovering Polymarket BTC 15m market...");
+    let btc_15m_market = poly_client
+        .get_btc_market_for_timeframe(types::Timeframe::FifteenMin)
+        .await
+        .context("Failed to fetch BTC 15m market")?;
+    info!("[Init] BTC 15m: \"{}\"", btc_15m_market.question);
 
-    // Build contract slots: BTC 5m, BTC 15m
-    // expiry_ts: set to end-of-day UTC (you'd fetch this from the market metadata in production)
+    // Extract YES/NO tokens per timeframe.
+    // For up/down markets there is no fixed strike; we use 0.0 as a sentinel.
+    // The detector will substitute the live BTC price as the dynamic reference.
+    let btc_5m_yes = btc_5m_market
+        .tokens.iter().find(|t| t.outcome.to_lowercase() == "yes").cloned()
+        .context("No YES token in BTC 5m market")?;
+    let btc_5m_no = btc_5m_market
+        .tokens.iter().find(|t| t.outcome.to_lowercase() == "no").cloned()
+        .context("No NO token in BTC 5m market")?;
+
+    let btc_15m_yes = btc_15m_market
+        .tokens.iter().find(|t| t.outcome.to_lowercase() == "yes").cloned()
+        .context("No YES token in BTC 15m market")?;
+    let btc_15m_no = btc_15m_market
+        .tokens.iter().find(|t| t.outcome.to_lowercase() == "no").cloned()
+        .context("No NO token in BTC 15m market")?;
+
+    // Build contract slots
     let eod_ts = {
         let now = chrono::Utc::now();
         let eod = now.date_naive().and_hms_opt(23, 59, 59).unwrap();
@@ -128,20 +147,19 @@ async fn main() -> Result<()> {
         ContractSlot {
             asset: Asset::Btc,
             timeframe: Timeframe::FiveMin,
-            yes_token: btc_yes.clone(),
-            no_token: btc_no.clone(),
-            strike: btc_strike,
+            yes_token: btc_5m_yes,
+            no_token:  btc_5m_no,
+            strike:    0.0, // dynamic — up/down market, reference = live price
             expiry_ts: eod_ts,
         },
         ContractSlot {
             asset: Asset::Btc,
             timeframe: Timeframe::FifteenMin,
-            yes_token: btc_yes.clone(),
-            no_token: btc_no.clone(),
-            strike: btc_strike,
+            yes_token: btc_15m_yes,
+            no_token:  btc_15m_no,
+            strike:    0.0, // dynamic — up/down market, reference = live price
             expiry_ts: eod_ts,
         },
-        // ETH slots would go here once ETH market tokens are discovered
     ];
 
     // Channels
@@ -268,9 +286,3 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn extract_strike(question: &str) -> Option<f64> {
-    let start = question.find('$')? + 1;
-    let rest = &question[start..];
-    let end = rest.find(|c: char| !c.is_ascii_digit() && c != ',').unwrap_or(rest.len());
-    rest[..end].replace(',', "").parse().ok()
-}

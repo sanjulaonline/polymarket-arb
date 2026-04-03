@@ -1,8 +1,8 @@
 # Polymarket Latency Arbitrage Bot v2 — Rust
 
-A production-grade latency arb bot targeting Polymarket BTC/ETH 5-minute and
+A production-grade latency arb bot targeting Polymarket BTC 5-minute and
 15-minute up/down contracts. Implements every feature from the original Python
-prompt spec, rewritten in Rust for sub-100ms execution.
+prompt spec, rewritten in Rust for sub-100ms execution, and heavily upgraded with Bayesian probability updates and Stoikov-aligned inventory tracking.
 
 ---
 
@@ -10,15 +10,16 @@ prompt spec, rewritten in Rust for sub-100ms execution.
 
 | Feature | Status |
 |---|---|
-| BTC + ETH 5m and 15m contracts | ✅ |
+| BTC 5m and 15m Up/Down contracts | ✅ |
 | Binance WebSocket real-time feed | ✅ `wss://stream.binance.com:9443` |
 | TradingView WebSocket feed (BTC + ETH) | ✅ |
 | CryptoQuant WebSocket feed | ✅ |
-| Lag detection > 3 percentage points | ✅ `LAG_THRESHOLD_PP` |
-| Edge gate > 5% | ✅ `MIN_EDGE_PCT` |
+| Bayesian Posterior Estimation | ✅ `bayesian.rs` |
+| Stoikov Inventory Model | ✅ `stoikov.rs` |
+| Lag/Edge gate > 5% | ✅ `MIN_EDGE_PCT` |
 | Position size < 8% of portfolio | ✅ `MAX_POSITION_PCT` |
 | Confidence score gate > 85% | ✅ `MIN_CONFIDENCE` |
-| Half-Kelly position sizing | ✅ `kelly.rs` |
+| Fractional Kelly position sizing with uncertainty | ✅ `kelly.rs` |
 | Paper trading default (3 live flags) | ✅ `LIVE_FLAG_1/2/3` |
 | Telegram alerts on every trade | ✅ `telegram.rs` |
 | Telegram alerts on drawdown | ✅ |
@@ -48,14 +49,17 @@ prompt spec, rewritten in Rust for sub-100ms execution.
 │  For each (asset, timeframe) contract slot:                  │
 │    1. Pull best real price (Binance > TV > CryptoQuant)     │
 │    2. Pull Polymarket mid-probability                        │
-│    3. Compute CEX implied probability (logistic model)       │
-│    4. lag_pp = |cex_prob - poly_prob| * 100                 │
-│    5. Gate: lag ≥ 3pp                                       │
+│    3. ── BAYESIAN UPDATE ────────────────────────────────── │
+│       Feed new price to BayesianEstimator → get P(H|D)       │
+│    4. ── STOIKOV EVALUATION ─────────────────────────────── │
+│       Compute reservation price r = s - q·γ·σ²·(T-t)         │
+│    5. Gate: lag/edge ≥ threshold                             │
 │    6. Score confidence (6 signals weighted)                  │
 │    7. Gate: edge ≥ 5%, confidence ≥ 85%                     │
-│    8. Kelly size = f(edge, confidence, entry_prob)           │
+│    8. ── KELLY SIZING ───────────────────────────────────── │
+│       f* = (b·posterior - q) / b (scaled by inventory)       │
 │    9. Risk approval (position cap, daily drawdown)           │
-│   10. Paper log OR live FOK order                           │
+│   10. Paper log OR live FOK order → Record Stoikov Fill     │
 └─────────────────┬───────────────────────────────────────────┘
                   │
         ┌─────────┼─────────┐
@@ -194,7 +198,9 @@ src/
 ├── confidence.rs     — 6-signal confidence scorer + CEX probability model
 ├── kelly.rs          — fractional Kelly position sizing (with tests)
 ├── risk.rs           — atomic kill switch, daily drawdown, win-rate tracking
-├── detector.rs       — core strategy loop: lag detect → confidence → Kelly → execute
+├── bayesian.rs       — Bayesian posterior update from price ticks
+├── stoikov.rs        — Inventory-aware reservation price and spread calculation
+├── detector.rs       — core strategy loop: Bayesian → Stoikov → Kelly → execute
 ├── database.rs       — SQLite via rusqlite (WAL mode, insert/close/query)
 ├── telegram.rs       — Telegram Bot API alerts
 ├── dashboard.rs      — ratatui TUI: P&L, positions, last 10 trades

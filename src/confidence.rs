@@ -1,7 +1,7 @@
-/// Confidence score computation.
-///
-/// Combines multiple signals to produce a 0.0–1.0 confidence in the detected edge.
-/// Score is used as a gate (>= 0.85 required) and as a Kelly multiplier.
+//! Confidence score computation.
+//!
+//! Combines multiple signals to produce a 0.0–1.0 confidence in the detected edge.
+//! Score is used as a gate (>= 0.85 required) and as a Kelly multiplier.
 
 /// Inputs for scoring a potential trade opportunity.
 pub struct ConfidenceInput {

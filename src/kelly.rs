@@ -1,22 +1,22 @@
-/// Fractional Kelly Criterion — position sizing
-/// =============================================
-///
-/// Kelly formula (binary markets):
-///
-///   f* = (b·p − q) / b
-///
-/// where:
-///   p = our probability of winning       ← Bayesian posterior P(H|D)
-///   q = 1 − p (probability of losing)
-///   b = net odds = (1 − entry_price) / entry_price
-///       (if we pay 0.40 per share → b = 0.60/0.40 = 1.5)
-///
-/// We apply three scaling factors before converting to dollars:
-///   1. `kelly_fraction` (e.g. 0.5 = half-Kelly) — reduces variance
-///   2. Bayesian uncertainty penalty — scales by (1 − posterior_variance·k)
-///   3. Stoikov inventory adjustment — reduces size when already exposed
-///
-/// The result is clamped to [0, max_position_usdc].
+//! Fractional Kelly Criterion — position sizing
+//! =============================================
+//!
+//! Kelly formula (binary markets):
+//!
+//!   f* = (b·p − q) / b
+//!
+//! where:
+//!   p = our probability of winning       ← Bayesian posterior P(H|D)
+//!   q = 1 − p (probability of losing)
+//!   b = net odds = (1 − entry_price) / entry_price
+//!       (if we pay 0.40 per share → b = 0.60/0.40 = 1.5)
+//!
+//! We apply three scaling factors before converting to dollars:
+//!   1. `kelly_fraction` (e.g. 0.5 = half-Kelly) — reduces variance
+//!   2. Bayesian uncertainty penalty — scales by (1 − posterior_variance·k)
+//!   3. Stoikov inventory adjustment — reduces size when already exposed
+//!
+//! The result is clamped to [0, max_position_usdc].
 
 /// Full Kelly inputs — all three models feed into here.
 #[derive(Debug, Clone)]
@@ -98,7 +98,7 @@ pub fn kelly_size(inp: &KellyInput) -> KellyOutput {
 
     // Additional penalty for low effective N (not enough data yet)
     // Scales from 0.3 (N=1) to 1.0 (N≥20)
-    let n_factor = (inp.effective_n / 20.0).min(1.0).max(0.3);
+    let n_factor = (inp.effective_n / 20.0).clamp(0.3, 1.0);
 
     let uncertainty_penalised = fractional * uncertainty_factor * n_factor;
 
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn test_inventory_reduces_size() {
-        let mut inp_flat = base_input(0.65, 0.50);
+        let inp_flat = base_input(0.65, 0.50);
         let mut inp_long = base_input(0.65, 0.50);
         inp_long.inventory_q = 0.8; // heavily long
 
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn test_high_variance_reduces_size() {
-        let mut low_var = base_input(0.60, 0.50);
+        let low_var = base_input(0.60, 0.50);
         let mut high_var = base_input(0.60, 0.50);
         high_var.posterior_variance = 0.04;
 

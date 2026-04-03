@@ -11,7 +11,6 @@ pub struct PolymarketPoller {
     client: Arc<PolymarketClient>,
     token_id: String,
     asset: Asset,
-    strike: f64,
     interval_ms: u64,
     tx: broadcast::Sender<PriceTick>,
 }
@@ -21,48 +20,37 @@ impl PolymarketPoller {
         client: Arc<PolymarketClient>,
         token_id: String,
         asset: Asset,
-        strike: f64,
+        _strike: f64, // kept for API compat; unused for up/down markets
         interval_ms: u64,
         tx: broadcast::Sender<PriceTick>,
     ) -> Self {
-        Self { client, token_id, asset, strike, interval_ms, tx }
+        Self { client, token_id, asset, interval_ms, tx }
     }
 
     pub async fn run(&self) -> Result<()> {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(self.interval_ms));
-        let mut consecutive_failures = 0u32;
+        let mut interval =
+            tokio::time::interval(tokio::time::Duration::from_millis(self.interval_ms));
         loop {
             interval.tick().await;
-            match self.client.implied_btc_price(&self.token_id, self.strike).await {
-                Ok(price) => {
-                    consecutive_failures = 0;
-                    debug!("[Polymarket/{:?}] implied={:.2}", self.asset, price);
+            // For up/down markets the YES-token mid-probability is the signal (0.0–1.0).
+            // We don't derive a dollar price here — the Detector fetches poly_prob itself.
+            // This poller feeds the Aggregator only for cross-source latency tracking.
+            match self.client.mid_probability(&self.token_id).await {
+                Ok(prob) => {
+                    debug!("[Polymarket/{:?}] mid_prob={:.4}", self.asset, prob);
+                    // Emit prob scaled to a nominal dollar range so PriceTick.price
+                    // stays comparable when the aggregator logs spread across sources.
+                    // The detector always re-fetches poly_prob directly from the book.
                     let _ = self.tx.send(PriceTick {
                         source: PriceSource::Polymarket,
                         asset: self.asset,
-                        price,
+                        price: prob, // raw probability in [0, 1]
                         timestamp: Utc::now(),
                     });
                 }
-                Err(e) => {
-                    let msg = format!("{:#}", e);
-                    if msg.contains("book unavailable") || msg.contains("No orderbook exists") {
-                        warn!(
-                            "[Polymarket/{:?}] {} — disabling this poller token={}",
-                            self.asset,
-                            msg,
-                            self.token_id
-                        );
-                        return Ok(());
-                    }
-
-                    consecutive_failures += 1;
-                    warn!("[Polymarket/{:?}] poll error: {msg}", self.asset);
-                    if consecutive_failures >= 10 {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                    }
-                }
+                Err(e) => warn!("[Polymarket/{:?}] poll error: {e}", self.asset),
             }
         }
     }
 }
+

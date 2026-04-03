@@ -1,23 +1,23 @@
-/// Detector — the strategy execution loop
-/// ========================================
-///
-/// Decision pipeline per (asset, timeframe) contract slot, on every price tick:
-///
-///   1. Pull best real price (Binance > TradingView > CryptoQuant)
-///   2. Pull Polymarket mid-probability from order book
-///   3. ── BAYESIAN UPDATE ──────────────────────────────────────────────────
-///      Feed the new price into BayesianEstimator → get posterior P(H|D)
-///      This updates faster than the crowd can reprice the contract
-///   4. ── STOIKOV EVALUATION ─────────────────────────────────────────────
-///      Compute reservation price r = s - q·γ·σ²·(T-t)
-///      Check if market is on the right side of our reservation price
-///   5. Gate: lag ≥ threshold (fast pre-filter before expensive checks)
-///   6. Score confidence (6-signal scorer)
-///   7. Gate: edge ≥ MIN_EDGE_PCT and confidence ≥ MIN_CONFIDENCE
-///   8. ── KELLY SIZING ────────────────────────────────────────────────────
-///      f* = (b·posterior - q_loss) / b  → scaled by uncertainty + inventory
-///   9. Risk approval (daily cap, kill switch)
-///  10. Paper log OR live FOK order → record fill in Stoikov inventory
+//! Detector — the strategy execution loop
+//! ========================================
+//!
+//! Decision pipeline per (asset, timeframe) contract slot, on every price tick:
+//!
+//!   1. Pull best real price (Binance > TradingView > CryptoQuant)
+//!   2. Pull Polymarket mid-probability from order book
+//!   3. ── BAYESIAN UPDATE ──────────────────────────────────────────────────
+//!      Feed the new price into BayesianEstimator → get posterior P(H|D)
+//!      This updates faster than the crowd can reprice the contract
+//!   4. ── STOIKOV EVALUATION ─────────────────────────────────────────────
+//!      Compute reservation price r = s - q·γ·σ²·(T-t)
+//!      Check if market is on the right side of our reservation price
+//!   5. Gate: lag ≥ threshold (fast pre-filter before expensive checks)
+//!   6. Score confidence (6-signal scorer)
+//!   7. Gate: edge ≥ MIN_EDGE_PCT and confidence ≥ MIN_CONFIDENCE
+//!   8. ── KELLY SIZING ────────────────────────────────────────────────────
+//!      f* = (b·posterior - q_loss) / b  → scaled by uncertainty + inventory
+//!   9. Risk approval (daily cap, kill switch)
+//!  10. Paper log OR live FOK order → record fill in Stoikov inventory
 
 use anyhow::Result;
 use chrono::Utc;
@@ -151,9 +151,12 @@ impl Detector {
         let mut states = HashMap::new();
         for slot in &contracts {
             let key = (format!("{:?}", slot.asset), format!("{:?}", slot.timeframe));
-            let max_shares = cfg.max_position_usdc() / 0.50; // approx at 50¢ per share
+            let max_shares = cfg.max_position_usdc() / 0.50;
+            // For up/down markets (strike==0.0) we use a reasonable BTC placeholder;
+            // the detector will reinitialize with the actual live price on the first tick.
+            let init_strike = if slot.strike > 0.0 { slot.strike } else { 83_000.0 };
             states.insert(key, SlotState::new(
-                0.50, slot.strike, &cfg, max_shares, slot.time_to_expiry_secs(),
+                0.50, init_strike, &cfg, max_shares, slot.time_to_expiry_secs(),
             ));
         }
 
@@ -204,7 +207,8 @@ impl Detector {
             let mut states = self.states.lock();
             let state = states.entry(key).or_insert_with(|| {
                 let max_shares = self.cfg.max_position_usdc() / 0.50;
-                SlotState::new(poly_prob, slot.strike, &self.cfg, max_shares, slot.time_to_expiry_secs())
+                let init_strike = if slot.strike > 0.0 { slot.strike } else { real_price };
+                SlotState::new(poly_prob, init_strike, &self.cfg, max_shares, slot.time_to_expiry_secs())
             });
 
             let prev_price = state.prev_price;
@@ -219,7 +223,10 @@ impl Detector {
             };
 
             // Active hypothesis: which direction does the Bayesian model lean?
-            let cex_prob = cex_implied_probability(real_price, slot.strike, timeframe_mins);
+            // For up/down markets, strike is 0.0 (sentinel). Use live price as the
+            // dynamic reference so cex_implied_probability stays well-conditioned.
+            let effective_strike = if slot.strike > 0.0 { slot.strike } else { real_price };
+            let cex_prob = cex_implied_probability(real_price, effective_strike, timeframe_mins);
             let direction_up = cex_prob > poly_prob;
             let posterior = if direction_up { posterior_up } else { posterior_down };
 
