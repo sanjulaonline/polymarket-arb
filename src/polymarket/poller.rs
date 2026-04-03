@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use super::client::PolymarketClient;
 use crate::types::{Asset, PriceSource, PriceTick};

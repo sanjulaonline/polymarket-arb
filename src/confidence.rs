@@ -3,8 +3,6 @@
 /// Combines multiple signals to produce a 0.0–1.0 confidence in the detected edge.
 /// Score is used as a gate (>= 0.85 required) and as a Kelly multiplier.
 
-use chrono::{DateTime, Timelike, Utc};
-
 /// Inputs for scoring a potential trade opportunity.
 pub struct ConfidenceInput {
     /// Number of real-price sources currently agreeing (1..=3)
@@ -19,8 +17,6 @@ pub struct ConfidenceInput {
     pub book_depth_usdc: f64,
     /// Time since last Binance/TV price update (ms)
     pub price_latency_ms: u64,
-    /// Current UTC time (for session scoring)
-    pub now: DateTime<Utc>,
 }
 
 /// Returns a confidence score in [0.0, 1.0].

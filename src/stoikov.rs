@@ -38,7 +38,6 @@
 /// heavily (inventory-neutral discipline) and skews quoting dynamically
 /// as inventory accumulates.
 
-use std::f64::consts::E;
 use tracing::debug;
 
 // ── Volatility estimator (rolling) ────────────────────────────────────────────

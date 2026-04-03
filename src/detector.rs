@@ -269,7 +269,6 @@ impl Detector {
                     edge_pct: bayes_edge_pp,
                     book_depth_usdc: 1_000.0,
                     price_latency_ms,
-                    now: Utc::now(),
                 });
 
                 // ── Step 8: Kelly sizing ───────────────────────────────────────

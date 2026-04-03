@@ -4,11 +4,11 @@ use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use reqwest::{Client, StatusCode};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
-use tracing::{debug, info, warn};
+use tracing::warn;
 
 use crate::config::Config;
 

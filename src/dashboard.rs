@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
     Frame, Terminal,
 };
 use std::{
@@ -35,7 +35,7 @@ impl Dashboard {
         Self { db, risk, cfg }
     }
 
-    pub async fn run(&self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
+    pub async fn run(&self, shutdown: watch::Receiver<bool>) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
@@ -116,7 +116,7 @@ impl Dashboard {
             .split(chunks[1]);
 
         let (daily_pnl, trade_count, win_rate, halted) = self.risk.snapshot();
-        let (db_pnl, db_trades, db_wins) = self.db.today_stats().unwrap_or((0.0, 0, 0));
+        let (_db_pnl, db_trades, db_wins) = self.db.today_stats().unwrap_or((0.0, 0, 0));
 
         let pnl_color = if daily_pnl >= 0.0 { Color::Green } else { Color::Red };
         let halted_str = if halted { " ⛔ HALTED" } else { " ✓ RUNNING" };

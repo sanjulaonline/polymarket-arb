@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod bayesian;
 mod confidence;
 mod config;

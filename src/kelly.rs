@@ -18,8 +18,6 @@
 ///
 /// The result is clamped to [0, max_position_usdc].
 
-use crate::bayesian::BayesianSummary;
-
 /// Full Kelly inputs — all three models feed into here.
 #[derive(Debug, Clone)]
 pub struct KellyInput {
