@@ -14,6 +14,8 @@ pub struct RiskManager {
     win_count: Arc<AtomicI64>,
     /// Kill switch — set to true when daily drawdown cap is hit
     kill_switch: Arc<AtomicBool>,
+    /// Total notional exposure in open positions (USDC cents)
+    open_exposure_cents: Arc<AtomicI64>,
 }
 
 impl RiskManager {
@@ -24,6 +26,7 @@ impl RiskManager {
             trade_count: Arc::new(AtomicI64::new(0)),
             win_count: Arc::new(AtomicI64::new(0)),
             kill_switch: Arc::new(AtomicBool::new(false)),
+            open_exposure_cents: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -54,10 +57,23 @@ impl RiskManager {
             warn!("[Risk] At {:.0}% of daily drawdown cap!", pct_of_cap);
         }
 
-        // Clamp to max position
+        let exposure_cap = self.cfg.max_total_exposure_usdc();
+        let current_exposure = self.open_exposure_usdc();
+        if current_exposure >= exposure_cap {
+            warn!(
+                "[Risk] Open exposure cap hit: {:.2}/{:.2} USDC",
+                current_exposure, exposure_cap
+            );
+            return None;
+        }
+
+        let remaining_capacity = (exposure_cap - current_exposure).max(0.0);
+
+        // Clamp to per-trade limits and remaining global exposure capacity.
         let size = requested_size
             .min(self.cfg.max_position_usdc())
-            .min(self.cfg.max_order_size_usdc);
+            .min(self.cfg.max_order_size_usdc)
+            .min(remaining_capacity);
 
         if size < 1.0 {
             return None;
@@ -114,6 +130,40 @@ impl RiskManager {
 
     pub fn is_halted(&self) -> bool {
         self.kill_switch.load(Ordering::Relaxed)
+    }
+
+    /// Load exposure from persisted open positions on startup.
+    pub fn set_open_exposure_usdc(&self, exposure_usdc: f64) {
+        let cents = (exposure_usdc.max(0.0) * 100.0) as i64;
+        self.open_exposure_cents.store(cents, Ordering::Relaxed);
+        info!("[Risk] Open exposure synced: {:.2} USDC", exposure_usdc.max(0.0));
+    }
+
+    /// Reserve notional exposure after an order/trade is opened.
+    pub fn reserve_open_exposure(&self, size_usdc: f64) {
+        let cents = (size_usdc.max(0.0) * 100.0) as i64;
+        if cents <= 0 {
+            return;
+        }
+        self.open_exposure_cents.fetch_add(cents, Ordering::Relaxed);
+        info!("[Risk] Reserved exposure: +{:.2} USDC | total={:.2}", size_usdc, self.open_exposure_usdc());
+    }
+
+    /// Release notional exposure when a position is closed.
+    pub fn release_open_exposure(&self, size_usdc: f64) {
+        let cents = (size_usdc.max(0.0) * 100.0) as i64;
+        if cents <= 0 {
+            return;
+        }
+        let prev = self.open_exposure_cents.fetch_sub(cents, Ordering::Relaxed);
+        if prev < cents {
+            self.open_exposure_cents.store(0, Ordering::Relaxed);
+        }
+        info!("[Risk] Released exposure: -{:.2} USDC | total={:.2}", size_usdc, self.open_exposure_usdc());
+    }
+
+    pub fn open_exposure_usdc(&self) -> f64 {
+        self.open_exposure_cents.load(Ordering::Relaxed) as f64 / 100.0
     }
 
     /// Returns (daily_pnl, trade_count, win_rate_pct, halted)

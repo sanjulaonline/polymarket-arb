@@ -104,6 +104,14 @@ async fn main() -> Result<()> {
     ));
     let db = Arc::new(Database::open("trades.db", cfg.enable_database)?);
 
+    let startup_open_exposure: f64 = db
+        .open_positions()
+        .unwrap_or_default()
+        .iter()
+        .map(|t| t.size_usdc)
+        .sum();
+    risk.set_open_exposure_usdc(startup_open_exposure);
+
     // Discover markets — fetch 5m and 15m BTC markets independently
     info!("[Init] Discovering Polymarket BTC 5m market...");
     let btc_5m_market = poly_client
@@ -228,10 +236,11 @@ async fn main() -> Result<()> {
             continue;
         }
         let asset = slot.asset;
+        let timeframe = slot.timeframe;
         let strike = slot.strike;
         let poll_ms = cfg.poly_poll_ms;
         handles.push(tokio::spawn(async move {
-            let poller = PolymarketPoller::new(client, token_id, asset, strike, poll_ms, tx);
+            let poller = PolymarketPoller::new(client, token_id, asset, timeframe, strike, poll_ms, tx);
             if let Err(e) = poller.run().await { error!("[Polymarket poller] fatal: {e}"); }
         }));
     }

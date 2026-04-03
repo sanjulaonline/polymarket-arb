@@ -29,6 +29,8 @@ pub struct Config {
     pub min_edge_pct: f64,
     /// Max position size as % of portfolio (8% default)
     pub max_position_pct: f64,
+    /// Max total open exposure across all active positions as % of portfolio
+    pub max_total_exposure_pct: f64,
     /// Min confidence score 0–1 (0.85 default)
     pub min_confidence: f64,
     /// Kelly multiplier — 0.5 = half-Kelly
@@ -103,6 +105,7 @@ impl Config {
             lag_threshold_pp: parse_f64("LAG_THRESHOLD_PP", 3.0)?,
             min_edge_pct: parse_f64("MIN_EDGE_PCT", 5.0)?,
             max_position_pct: parse_f64("MAX_POSITION_PCT", 8.0)?,
+            max_total_exposure_pct: parse_f64("MAX_TOTAL_EXPOSURE_PCT", 16.0)?,
             min_confidence: parse_f64("MIN_CONFIDENCE", 0.85)?,
             kelly_fraction: parse_f64("KELLY_FRACTION", 0.5)?,
             daily_drawdown_kill_pct: parse_f64("DAILY_DRAWDOWN_KILL_PCT", 20.0)?,
@@ -113,12 +116,10 @@ impl Config {
             poly_poll_ms: parse_u64("POLY_POLL_MS", 200)?,
 
             // Live trading — all three must be explicitly set to "true"
-            paper_trading: env::var("PAPER_TRADING")
-                .map(|v| v != "false")
-                .unwrap_or(true),
-            live_flag_1: env::var("LIVE_FLAG_1").map(|v| v == "true").unwrap_or(false),
-            live_flag_2: env::var("LIVE_FLAG_2").map(|v| v == "true").unwrap_or(false),
-            live_flag_3: env::var("LIVE_FLAG_3").map(|v| v == "true").unwrap_or(false),
+            paper_trading: parse_bool("PAPER_TRADING", true),
+            live_flag_1: parse_bool("LIVE_FLAG_1", false),
+            live_flag_2: parse_bool("LIVE_FLAG_2", false),
+            live_flag_3: parse_bool("LIVE_FLAG_3", false),
 
             // Bayesian defaults
             bayes_prior_strength: parse_f64("BAYES_PRIOR_STRENGTH", 10.0)?,
@@ -146,6 +147,10 @@ impl Config {
 
     pub fn max_position_usdc(&self) -> f64 {
         self.portfolio_size_usdc * self.max_position_pct / 100.0
+    }
+
+    pub fn max_total_exposure_usdc(&self) -> f64 {
+        self.portfolio_size_usdc * self.max_total_exposure_pct / 100.0
     }
 }
 

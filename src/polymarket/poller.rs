@@ -5,12 +5,13 @@ use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
 use super::client::PolymarketClient;
-use crate::types::{Asset, PriceSource, PriceTick};
+use crate::types::{Asset, PriceSource, PriceTick, Timeframe};
 
 pub struct PolymarketPoller {
     client: Arc<PolymarketClient>,
     token_id: String,
     asset: Asset,
+    timeframe: Timeframe,
     interval_ms: u64,
     tx: broadcast::Sender<PriceTick>,
 }
@@ -20,11 +21,12 @@ impl PolymarketPoller {
         client: Arc<PolymarketClient>,
         token_id: String,
         asset: Asset,
+        timeframe: Timeframe,
         _strike: f64, // kept for API compat; unused for up/down markets
         interval_ms: u64,
         tx: broadcast::Sender<PriceTick>,
     ) -> Self {
-        Self { client, token_id, asset, interval_ms, tx }
+        Self { client, token_id, asset, timeframe, interval_ms, tx }
     }
 
     pub async fn run(&self) -> Result<()> {
@@ -44,6 +46,7 @@ impl PolymarketPoller {
                     let _ = self.tx.send(PriceTick {
                         source: PriceSource::Polymarket,
                         asset: self.asset,
+                        timeframe: Some(self.timeframe),
                         price: prob, // raw probability in [0, 1]
                         timestamp: Utc::now(),
                     });

@@ -62,6 +62,8 @@ impl std::fmt::Display for PriceSource {
 pub struct PriceTick {
     pub source: PriceSource,
     pub asset: Asset,
+    /// Optional contract timeframe discriminator (used by Polymarket 5m vs 15m ticks)
+    pub timeframe: Option<Timeframe>,
     pub price: f64,
     pub timestamp: DateTime<Utc>,
 }

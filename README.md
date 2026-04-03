@@ -129,6 +129,7 @@ LIVE_FLAG_3=true
 ```
 
 This triple-flag design prevents accidental live trading from a single env var typo.
+Booleans are parsed case-insensitively (`true/false`, `yes/no`, `1/0`, `on/off`).
 
 ---
 
@@ -169,6 +170,9 @@ When daily drawdown exceeds `DAILY_DRAWDOWN_KILL_PCT` (default 20%):
 1. `AtomicBool` kill switch flips — all new trades blocked immediately
 2. Telegram alert sent
 3. Resets at midnight UTC automatically
+
+Portfolio exposure is also capped by `MAX_TOTAL_EXPOSURE_PCT` (default 16%),
+which limits total notional across all open positions.
 
 ---
 

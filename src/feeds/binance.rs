@@ -65,6 +65,7 @@ impl BinanceFeed {
                         let _ = self.tx.send(PriceTick {
                             source: PriceSource::Binance,
                             asset,
+                            timeframe: None,
                             price,
                             timestamp: Utc::now(),
                         });
@@ -83,9 +84,10 @@ impl BinanceFeed {
     fn parse(&self, raw: &str) -> Option<(Asset, f64)> {
         let wrapper: StreamWrapper = serde_json::from_str(raw).ok()?;
         let price: f64 = wrapper.data.close.parse().ok()?;
-        let asset = if wrapper.stream.starts_with("btc") {
+        let stream = wrapper.stream.to_lowercase();
+        let asset = if stream.contains("btcusdt") {
             Asset::Btc
-        } else if wrapper.stream.starts_with("eth") {
+        } else if stream.contains("ethusdt") {
             Asset::Eth
         } else {
             return None;

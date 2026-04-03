@@ -102,6 +102,7 @@ impl TradingViewFeed {
                         let _ = self.tx.send(PriceTick {
                             source: PriceSource::TradingView,
                             asset: self.asset,
+                            timeframe: None,
                             price,
                             timestamp: Utc::now(),
                         });

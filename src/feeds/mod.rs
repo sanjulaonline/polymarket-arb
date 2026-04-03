@@ -9,10 +9,11 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::debug;
 
-use crate::types::{Asset, PriceSource, PriceTick};
+use crate::types::{Asset, PriceSource, PriceTick, Timeframe};
 
-/// Key for the latest-price map: (source, asset)
-type FeedKey = (PriceSource, Asset);
+/// Key for the latest-price map: (source, asset, timeframe)
+/// Timeframe is None for spot feeds and Some(5m/15m) for Polymarket contract ticks.
+type FeedKey = (PriceSource, Asset, Option<Timeframe>);
 
 /// Aggregates prices from all feeds, keyed by (source, asset).
 pub struct PriceAggregator {
@@ -31,8 +32,13 @@ impl PriceAggregator {
 
     pub async fn run(&self, mut rx: broadcast::Receiver<PriceTick>) -> Result<()> {
         while let Ok(tick) = rx.recv().await {
-            debug!("[Aggregator] {} {} price={:.2}", tick.source, tick.asset, tick.price);
-            self.latest.insert((tick.source, tick.asset), tick.clone());
+            if tick.source == PriceSource::Polymarket {
+                debug!("[Aggregator] {} {} prob={:.4}", tick.source, tick.asset, tick.price);
+            } else {
+                debug!("[Aggregator] {} {} price={:.2}", tick.source, tick.asset, tick.price);
+            }
+            self.latest
+                .insert((tick.source, tick.asset, tick.timeframe), tick.clone());
             let _ = self.tx.send(tick);
         }
         Ok(())
@@ -47,7 +53,7 @@ impl PriceAggregator {
             (PriceSource::CryptoQuant, 10),
         ];
         for (src, max_age_secs) in candidates {
-            if let Some(t) = self.latest.get(&(src, asset)) {
+            if let Some(t) = self.latest.get(&(src, asset, None)) {
                 if (Utc::now() - t.timestamp).num_seconds() <= max_age_secs {
                     return Some(t.price);
                 }
@@ -56,9 +62,11 @@ impl PriceAggregator {
         None
     }
 
-    /// Latest Polymarket implied price for `asset`.
-    pub fn poly_price(&self, asset: Asset) -> Option<f64> {
-        let t = self.latest.get(&(PriceSource::Polymarket, asset))?;
+    /// Latest Polymarket implied price for (`asset`, `timeframe`).
+    pub fn poly_price(&self, asset: Asset, timeframe: Timeframe) -> Option<f64> {
+        let t = self
+            .latest
+            .get(&(PriceSource::Polymarket, asset, Some(timeframe)))?;
         if (Utc::now() - t.timestamp).num_seconds() <= 3 {
             Some(t.price)
         } else {

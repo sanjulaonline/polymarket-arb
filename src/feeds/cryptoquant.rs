@@ -81,6 +81,7 @@ impl CryptoQuantFeed {
                         let _ = self.tx.send(PriceTick {
                             source: PriceSource::CryptoQuant,
                             asset: Asset::Btc,
+                            timeframe: None,
                             price,
                             timestamp: Utc::now(),
                         });

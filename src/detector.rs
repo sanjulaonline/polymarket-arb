@@ -81,6 +81,10 @@ struct SlotState {
     last_direction_up: Option<bool>,
     /// Timestamp of last slot evaluation
     last_eval: Option<Instant>,
+    /// Open price of the current timeframe bucket (used as up/down reference strike)
+    candle_open_price: Option<f64>,
+    /// UTC epoch timestamp of current bucket start
+    candle_bucket_start_ts: Option<i64>,
 }
 
 impl SlotState {
@@ -109,6 +113,8 @@ impl SlotState {
             streak: 0,
             last_direction_up: None,
             last_eval: None,
+            candle_open_price: None,
+            candle_bucket_start_ts: None,
         }
     }
 
@@ -132,7 +138,7 @@ pub struct Detector {
     db: Arc<Database>,
     tg: Arc<Telegram>,
     contracts: Vec<ContractSlot>,
-    latest: Arc<DashMap<(PriceSource, Asset), PriceTick>>,
+    latest: Arc<DashMap<(PriceSource, Asset, Option<Timeframe>), PriceTick>>,
     /// Per-slot model state, keyed by (asset_str, timeframe_str)
     states: Mutex<HashMap<(String, String), SlotState>>,
 }
@@ -145,20 +151,11 @@ impl Detector {
         db: Arc<Database>,
         tg: Arc<Telegram>,
         contracts: Vec<ContractSlot>,
-        latest: Arc<DashMap<(PriceSource, Asset), PriceTick>>,
+        latest: Arc<DashMap<(PriceSource, Asset, Option<Timeframe>), PriceTick>>,
     ) -> Self {
-        // Pre-init slot states with neutral priors (will be updated on first poll)
-        let mut states = HashMap::new();
-        for slot in &contracts {
-            let key = (format!("{:?}", slot.asset), format!("{:?}", slot.timeframe));
-            let max_shares = cfg.max_position_usdc() / 0.50;
-            // For up/down markets (strike==0.0) we use a reasonable BTC placeholder;
-            // the detector will reinitialize with the actual live price on the first tick.
-            let init_strike = if slot.strike > 0.0 { slot.strike } else { 83_000.0 };
-            states.insert(key, SlotState::new(
-                0.50, init_strike, &cfg, max_shares, slot.time_to_expiry_secs(),
-            ));
-        }
+        // Slot state is created lazily on first valid tick so priors and strike references
+        // are seeded from timeframe-correct market data.
+        let states = HashMap::new();
 
         Self {
             cfg,
@@ -194,9 +191,16 @@ impl Detector {
         let real_price = match self.best_price(slot.asset) { Some(p) => p, None => return };
 
         // ── Step 2: get Polymarket mid-probability ────────────────────────────
-        let poly_prob = match self.client.mid_probability(&slot.yes_token.token_id).await {
-            Ok(p) => p,
-            Err(e) => { debug!("[Detector] poly_prob err ({:?}/{:?}): {e}", slot.asset, slot.timeframe); return; }
+        // Use aggregated Polymarket data to avoid redundant API calls and respect staleness
+        let poly_prob = match self.poly_price(slot.asset, slot.timeframe) {
+            Some(p) => p,
+            None => {
+                // Fallback to direct poll if aggregator is empty
+                match self.client.mid_probability(&slot.yes_token.token_id).await {
+                    Ok(p) => p,
+                    Err(e) => { debug!("[Detector] poly_prob err ({:?}/{:?}): {e}", slot.asset, slot.timeframe); return; }
+                }
+            }
         };
 
         let key = (format!("{:?}", slot.asset), format!("{:?}", slot.timeframe));
@@ -223,9 +227,13 @@ impl Detector {
             };
 
             // Active hypothesis: which direction does the Bayesian model lean?
-            // For up/down markets, strike is 0.0 (sentinel). Use live price as the
-            // dynamic reference so cex_implied_probability stays well-conditioned.
-            let effective_strike = if slot.strike > 0.0 { slot.strike } else { real_price };
+            // For up/down markets (strike == 0.0), use this candle's open as the
+            // directional reference price for the timeframe bucket.
+            let effective_strike = if slot.strike > 0.0 {
+                slot.strike
+            } else {
+                self.updown_reference_strike(state, slot.timeframe, real_price)
+            };
             let cex_prob = cex_implied_probability(real_price, effective_strike, timeframe_mins);
             let direction_up = cex_prob > poly_prob;
             let posterior = if direction_up { posterior_up } else { posterior_down };
@@ -265,7 +273,7 @@ impl Detector {
                 // ── Step 6: confidence score ───────────────────────────────────
                 let streak = state.update_streak(direction_up);
                 let price_latency_ms = self.latest
-                    .get(&(PriceSource::Binance, slot.asset))
+                    .get(&(PriceSource::Binance, slot.asset, None))
                     .map(|t| (Utc::now() - t.timestamp).num_milliseconds().max(0) as u64)
                     .unwrap_or(999);
 
@@ -377,6 +385,7 @@ impl Detector {
         // Paper mode
         if !self.cfg.is_live() {
             let row_id = self.db.insert_trade(&record).unwrap_or(0);
+            self.risk.reserve_open_exposure(size_usdc);
             info!(
                 "[Paper] #{row_id} {asset_str}/{tf_str} {direction_str} ${size_usdc:.2} \
                  bayes={:.4} r={:.4} kelly_f={:.3} edge={:.1}%",
@@ -401,6 +410,7 @@ impl Detector {
             Ok(order_id) => {
                 let ms = t0.elapsed().as_millis();
                 info!("[Executor] ✓ {order_id} | {asset_str}/{tf_str} {direction_str} ${size_usdc:.2} | {ms}ms");
+                self.risk.reserve_open_exposure(size_usdc);
 
                 // Record fill in Stoikov inventory
                 {
@@ -439,10 +449,22 @@ impl Detector {
             (PriceSource::TradingView, 5),
             (PriceSource::CryptoQuant, 10),
         ] {
-            if let Some(t) = self.latest.get(&(src, asset)) {
+            if let Some(t) = self.latest.get(&(src, asset, None)) {
                 if (Utc::now() - t.timestamp).num_seconds() <= max_age {
                     return Some(t.price);
                 }
+            }
+        }
+        None
+    }
+
+    fn poly_price(&self, asset: Asset, timeframe: Timeframe) -> Option<f64> {
+        if let Some(t) = self
+            .latest
+            .get(&(PriceSource::Polymarket, asset, Some(timeframe)))
+        {
+            if (Utc::now() - t.timestamp).num_seconds() <= 3 {
+                return Some(t.price);
             }
         }
         None
@@ -452,7 +474,7 @@ impl Detector {
         [PriceSource::Binance, PriceSource::TradingView, PriceSource::CryptoQuant]
             .iter()
             .filter(|&&src| {
-                self.latest.get(&(src, asset))
+                self.latest.get(&(src, asset, None))
                     .map(|t| (Utc::now() - t.timestamp).num_seconds() <= 10)
                     .unwrap_or(false)
             })
@@ -463,7 +485,7 @@ impl Detector {
         let prices: Vec<f64> = [PriceSource::Binance, PriceSource::TradingView, PriceSource::CryptoQuant]
             .iter()
             .filter_map(|&src| {
-                self.latest.get(&(src, asset)).and_then(|t| {
+                self.latest.get(&(src, asset, None)).and_then(|t| {
                     if (Utc::now() - t.timestamp).num_seconds() <= 10 { Some(t.price) } else { None }
                 })
             })
@@ -473,5 +495,34 @@ impl Detector {
         let max = prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         if min <= 0.0 { return 0.5; }
         (max - min) / min * 100.0
+    }
+
+    fn updown_reference_strike(
+        &self,
+        state: &mut SlotState,
+        timeframe: Timeframe,
+        real_price: f64,
+    ) -> f64 {
+        let bucket_secs = Self::timeframe_bucket_secs(timeframe);
+        let now_ts = Utc::now().timestamp();
+        let bucket_start = now_ts - now_ts.rem_euclid(bucket_secs);
+
+        if state.candle_bucket_start_ts != Some(bucket_start) {
+            state.candle_bucket_start_ts = Some(bucket_start);
+            state.candle_open_price = Some(real_price);
+            debug!(
+                "[Detector] {:?} new bucket start={} open={:.2}",
+                timeframe, bucket_start, real_price
+            );
+        }
+
+        state.candle_open_price.unwrap_or(real_price)
+    }
+
+    fn timeframe_bucket_secs(timeframe: Timeframe) -> i64 {
+        match timeframe {
+            Timeframe::FiveMin => 5 * 60,
+            Timeframe::FifteenMin => 15 * 60,
+        }
     }
 }
