@@ -6,7 +6,7 @@ use chrono::{Timelike, Utc};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::Sha256;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -16,6 +16,9 @@ use crate::types::Timeframe;
 
 const CLOB_BASE: &str = "https://clob.polymarket.com";
 const SERVER_TIME_RESYNC_SECS: i64 = 30;
+const POLYGON_USDC_E_ADDRESS: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+const ERC20_BALANCE_OF_SELECTOR: &str = "70a08231";
+const USDC_E_DECIMALS: u32 = 6;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -65,6 +68,18 @@ struct GammaMarket {
 #[derive(Debug, Deserialize)]
 struct ServerTimeResponse {
     timestamp: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonRpcError {
+    code: i64,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonRpcResponse {
+    result: Option<String>,
+    error: Option<JsonRpcError>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -602,6 +617,62 @@ impl PolymarketClient {
         Err(last_err.unwrap_or_else(|| anyhow!("unable to fetch collateral balance")))
     }
 
+    /// TS-equivalent on-chain USDC.e fetch:
+    /// `balanceOf(proxyWallet)` via Polygon JSON-RPC `eth_call`.
+    pub async fn get_usdc_balance_onchain(&self, rpc_url: &str, wallet: &str) -> Result<f64> {
+        let wallet_hex = Self::normalize_address_hex(wallet)?;
+        let call_data = format!("0x{}{:0>64}", ERC20_BALANCE_OF_SELECTOR, wallet_hex);
+
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_call",
+            "params": [
+                {
+                    "to": POLYGON_USDC_E_ADDRESS,
+                    "data": call_data,
+                },
+                "latest"
+            ]
+        });
+
+        let resp = self
+            .http
+            .post(rpc_url)
+            .json(&payload)
+            .send()
+            .await
+            .context("POST polygon eth_call")?;
+
+        let status = resp.status();
+        let body = resp.text().await.context("read polygon eth_call body")?;
+
+        if !status.is_success() {
+            return Err(anyhow!(
+                "polygon eth_call failed with HTTP {}: {}",
+                status,
+                &body[..body.len().min(200)]
+            ));
+        }
+
+        let rpc: JsonRpcResponse =
+            serde_json::from_str(&body).context("parse polygon eth_call response")?;
+
+        if let Some(err) = rpc.error {
+            return Err(anyhow!(
+                "polygon eth_call rpc error {}: {}",
+                err.code,
+                err.message
+            ));
+        }
+
+        let raw_hex = rpc
+            .result
+            .ok_or_else(|| anyhow!("polygon eth_call response missing result"))?;
+        let raw = Self::parse_u256_hex_to_f64(&raw_hex)?;
+        Ok(raw / 10f64.powi(USDC_E_DECIMALS as i32))
+    }
+
     async fn fetch_collateral_balance_for_path(&self, path: &str) -> Result<f64> {
         let headers = self.auth_headers("GET", path, "").await;
         let mut req = self.http.get(format!("{}{}", CLOB_BASE, path));
@@ -688,6 +759,52 @@ impl PolymarketClient {
             Value::String(s) => s.trim().parse::<u32>().ok(),
             _ => None,
         }
+    }
+
+    fn normalize_address_hex(address: &str) -> Result<String> {
+        let trimmed = address.trim();
+        let hex = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+            .unwrap_or(trimmed);
+
+        if hex.len() != 40 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(anyhow!("invalid wallet address: {}", address));
+        }
+
+        Ok(hex.to_ascii_lowercase())
+    }
+
+    fn parse_u256_hex_to_f64(raw_hex: &str) -> Result<f64> {
+        let hex = raw_hex
+            .trim()
+            .strip_prefix("0x")
+            .or_else(|| raw_hex.trim().strip_prefix("0X"))
+            .unwrap_or(raw_hex.trim());
+
+        if hex.is_empty() {
+            return Ok(0.0);
+        }
+
+        if let Ok(v) = u128::from_str_radix(hex, 16) {
+            return Ok(v as f64);
+        }
+
+        // Fallback for values above u128 range.
+        let mut out = 0.0f64;
+        for c in hex.chars() {
+            let digit = c
+                .to_digit(16)
+                .ok_or_else(|| anyhow!("invalid hex digit '{}' in eth_call result", c))?
+                as f64;
+            out = out * 16.0 + digit;
+        }
+
+        if !out.is_finite() {
+            return Err(anyhow!("eth_call result is too large to represent as f64"));
+        }
+
+        Ok(out)
     }
 
     fn normalize_usdc(raw: f64, decimals: Option<u32>, integer_like: bool) -> f64 {

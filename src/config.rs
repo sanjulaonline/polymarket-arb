@@ -10,6 +10,10 @@ pub struct Config {
     pub polymarket_api_secret: String,
     pub polymarket_api_passphrase: String,
     pub polymarket_private_key: String,
+    /// Polygon RPC endpoint used for on-chain ERC20 balance queries
+    pub polygon_rpc_url: String,
+    /// Wallet address used for on-chain USDC.e balanceOf calls in paper mode
+    pub proxy_wallet: Option<String>,
 
     // ── CEX feeds ─────────────────────────────────────────────────────────────
     pub cryptoquant_api_key: String,
@@ -88,6 +92,12 @@ impl Config {
                 .unwrap_or_else(|_| "PAPER_MODE".into()),
             polymarket_private_key: env::var("POLYMARKET_PRIVATE_KEY")
                 .unwrap_or_else(|_| "PAPER_MODE".into()),
+            polygon_rpc_url: env::var("POLYGON_RPC_URL")
+                .unwrap_or_else(|_| "https://polygon-rpc.com".into()),
+            proxy_wallet: env::var("PROXY_WALLET")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
 
             // CEX
             cryptoquant_api_key: env::var("CRYPTOQUANT_API_KEY")

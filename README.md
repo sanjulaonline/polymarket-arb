@@ -108,6 +108,8 @@ MARKET_TIMEFRAMES=5m,15m  # both (default)
 - Go to https://polymarket.com → Profile → API Keys
 - Create a key — you'll get `api_key`, `secret`, `passphrase`
 - Set `POLYMARKET_PRIVATE_KEY` to your wallet's private key
+- Set `PROXY_WALLET` to the wallet address whose USDC.e balance should size paper bankroll
+- Optionally set `POLYGON_RPC_URL` (defaults to `https://polygon-rpc.com`)
 
 ### 4. Build release binary
 
@@ -130,9 +132,13 @@ The terminal dashboard opens immediately. Press `q` to quit.
 
 **Default: Paper mode** — no real orders, all trades simulated and logged.
 
-When paper mode is enabled, startup attempts to fetch your Polymarket collateral
-wallet balance from CLOB and uses that as the paper bankroll. If balance fetch
-fails, the bot falls back to `PORTFOLIO_SIZE_USDC` from `.env`.
+When paper mode is enabled, startup bankroll source priority is:
+1. Polygon on-chain `USDC.e.balanceOf(PROXY_WALLET)` via `eth_call`
+2. Polymarket CLOB collateral balance (`/balance-allowance`)
+3. `PORTFOLIO_SIZE_USDC` fallback from `.env`
+
+The Polygon path is the Rust port of the typical ethers.js flow:
+`new Contract(USDC).balanceOf(proxyWallet)` with 6 decimals.
 
 To enable live trading, **all four** conditions must be met in `.env`:
 

@@ -114,41 +114,79 @@ async fn main() -> Result<()> {
     let poly_client = Arc::new(PolymarketClient::new(&cfg)?);
 
     if cfg.paper_trading {
-        let has_auth = !cfg.polymarket_api_key.trim().is_empty()
-            && !cfg.polymarket_api_secret.trim().is_empty()
-            && !cfg.polymarket_api_passphrase.trim().is_empty()
-            && !cfg.polymarket_api_key.eq_ignore_ascii_case("paper_mode")
-            && !cfg.polymarket_api_secret.eq_ignore_ascii_case("paper_mode")
-            && !cfg.polymarket_api_passphrase.eq_ignore_ascii_case("paper_mode");
+        let mut bankroll_set = false;
 
-        if has_auth {
-            match poly_client.get_collateral_balance_usdc().await {
+        if let Some(proxy_wallet) = cfg.proxy_wallet.as_deref() {
+            match poly_client
+                .get_usdc_balance_onchain(&cfg.polygon_rpc_url, proxy_wallet)
+                .await
+            {
                 Ok(wallet_balance) if wallet_balance > 0.0 => {
                     let prev = cfg.portfolio_size_usdc;
                     cfg.portfolio_size_usdc = wallet_balance;
+                    bankroll_set = true;
                     info!(
-                        "[Init] Paper bankroll set from wallet balance: ${:.2} (PORTFOLIO_SIZE_USDC was ${:.2})",
+                        "[Init] Paper bankroll set from Polygon USDC.e balanceOf(PROXY_WALLET): ${:.2} (PORTFOLIO_SIZE_USDC was ${:.2})",
                         wallet_balance,
                         prev
                     );
                 }
                 Ok(_) => {
                     warn!(
-                        "[Init] Wallet balance fetch returned zero; using PORTFOLIO_SIZE_USDC=${:.2}",
-                        cfg.portfolio_size_usdc
+                        "[Init] Polygon USDC.e balanceOf(PROXY_WALLET) returned zero; trying CLOB balance fallback"
                     );
                 }
                 Err(e) => {
                     warn!(
-                        "[Init] Wallet balance fetch failed in paper mode: {}. Using PORTFOLIO_SIZE_USDC=${:.2}",
-                        e,
-                        cfg.portfolio_size_usdc
+                        "[Init] Polygon USDC.e balanceOf(PROXY_WALLET) failed: {}. Trying CLOB balance fallback",
+                        e
                     );
                 }
             }
         } else {
+            info!("[Init] PROXY_WALLET not configured; skipping Polygon balanceOf fetch");
+        }
+
+        if !bankroll_set {
+            let has_auth = !cfg.polymarket_api_key.trim().is_empty()
+                && !cfg.polymarket_api_secret.trim().is_empty()
+                && !cfg.polymarket_api_passphrase.trim().is_empty()
+                && !cfg.polymarket_api_key.eq_ignore_ascii_case("paper_mode")
+                && !cfg.polymarket_api_secret.eq_ignore_ascii_case("paper_mode")
+                && !cfg.polymarket_api_passphrase.eq_ignore_ascii_case("paper_mode");
+
+            if has_auth {
+                match poly_client.get_collateral_balance_usdc().await {
+                    Ok(wallet_balance) if wallet_balance > 0.0 => {
+                        let prev = cfg.portfolio_size_usdc;
+                        cfg.portfolio_size_usdc = wallet_balance;
+                        bankroll_set = true;
+                        info!(
+                            "[Init] Paper bankroll set from CLOB collateral balance: ${:.2} (PORTFOLIO_SIZE_USDC was ${:.2})",
+                            wallet_balance,
+                            prev
+                        );
+                    }
+                    Ok(_) => {
+                        warn!(
+                            "[Init] CLOB collateral balance returned zero; using PORTFOLIO_SIZE_USDC=${:.2}",
+                            cfg.portfolio_size_usdc
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "[Init] CLOB collateral balance fetch failed: {}. Using PORTFOLIO_SIZE_USDC=${:.2}",
+                            e,
+                            cfg.portfolio_size_usdc
+                        );
+                    }
+                }
+            }
+        }
+
+        if !bankroll_set {
             info!(
-                "[Init] Paper bankroll using PORTFOLIO_SIZE_USDC=${:.2} (Polymarket API credentials not configured)",
+                "[Init] Paper bankroll using PORTFOLIO_SIZE_USDC=${:.2} fallback",
                 cfg.portfolio_size_usdc
             );
         }
