@@ -14,6 +14,9 @@ prompt spec, rewritten in Rust for sub-100ms execution, and heavily upgraded wit
 | Binance WebSocket real-time feed | ✅ `wss://stream.binance.com:9443` |
 | TradingView WebSocket feed (BTC + ETH) | ✅ |
 | CryptoQuant WebSocket feed | ✅ |
+| Top-of-book parsing uses highest bid + lowest ask | ✅ |
+| Execution uses taker ask (not midpoint) | ✅ |
+| Wide-spread books (> $0.10) filtered from signal/execution | ✅ |
 | Bayesian Posterior Estimation | ✅ `bayesian.rs` |
 | Stoikov Inventory Model | ✅ `stoikov.rs` |
 | Lag/Edge gate > 5% | ✅ `MIN_EDGE_PCT` |
@@ -127,6 +130,10 @@ The terminal dashboard opens immediately. Press `q` to quit.
 
 **Default: Paper mode** — no real orders, all trades simulated and logged.
 
+When paper mode is enabled, startup attempts to fetch your Polymarket collateral
+wallet balance from CLOB and uses that as the paper bankroll. If balance fetch
+fails, the bot falls back to `PORTFOLIO_SIZE_USDC` from `.env`.
+
 To enable live trading, **all four** conditions must be met in `.env`:
 
 ```env
@@ -153,6 +160,10 @@ Each opportunity is scored 0.0–1.0 across 6 signals before the ≥85% gate:
 | Edge magnitude | 15% | 5% edge = 0.5, 15%+ = 1.0 |
 | Book depth | 10% | $5k+ depth = 1.0 |
 | Price latency | 5% | 0ms = 1.0, 500ms+ = 0.0 |
+
+Polymarket midpoint is used for signal comparison, but order execution uses
+top-of-book ask on the token being bought (taker behavior), consistent with
+Polymarket orderbook semantics.
 
 ---
 

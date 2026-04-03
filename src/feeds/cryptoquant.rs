@@ -83,6 +83,8 @@ impl CryptoQuantFeed {
                             asset: Asset::Btc,
                             timeframe: None,
                             book_depth_usdc: None,
+                            book_best_bid_prob: None,
+                            book_best_ask_prob: None,
                             price,
                             timestamp: Utc::now(),
                         });

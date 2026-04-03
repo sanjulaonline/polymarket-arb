@@ -6,6 +6,7 @@ use chrono::{Timelike, Utc};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::Sha256;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -87,15 +88,51 @@ pub struct Level {
 }
 
 fn de_str_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
-    let s: &str = serde::Deserialize::deserialize(d)?;
-    s.parse().map_err(serde::de::Error::custom)
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(f64),
+        Str(String),
+    }
+
+    match NumOrStr::deserialize(d)? {
+        NumOrStr::Num(v) => Ok(v),
+        NumOrStr::Str(s) => s.parse().map_err(serde::de::Error::custom),
+    }
 }
 
-/// Mid-price derived from an order book
+/// Top-of-book helpers for Polymarket order books.
 impl OrderBook {
+    /// Returns highest bid and lowest ask probabilities.
+    pub fn best_bid_ask(&self) -> Option<(f64, f64)> {
+        let best_bid = self
+            .bids
+            .iter()
+            .filter(|l| l.size > 0.0 && l.price.is_finite() && (0.0..=1.0).contains(&l.price))
+            .map(|l| l.price)
+            .max_by(|a, b| a.total_cmp(b))?;
+
+        let best_ask = self
+            .asks
+            .iter()
+            .filter(|l| l.size > 0.0 && l.price.is_finite() && (0.0..=1.0).contains(&l.price))
+            .map(|l| l.price)
+            .min_by(|a, b| a.total_cmp(b))?;
+
+        Some((best_bid, best_ask))
+    }
+
+    pub fn best_bid(&self) -> Option<f64> {
+        self.best_bid_ask().map(|(bid, _)| bid)
+    }
+
+    pub fn best_ask(&self) -> Option<f64> {
+        self.best_bid_ask().map(|(_, ask)| ask)
+    }
+
+    /// Midpoint display price derived from top-of-book best bid/ask.
     pub fn mid_price(&self) -> Option<f64> {
-        let best_bid = self.bids.first()?.price;
-        let best_ask = self.asks.first()?.price;
+        let (best_bid, best_ask) = self.best_bid_ask()?;
         Some((best_bid + best_ask) / 2.0)
     }
 }
@@ -514,8 +551,164 @@ impl PolymarketClient {
         let url = format!("{}{}", CLOB_BASE, path);
 
         let resp = self.http.get(&url).send().await.context("GET /book")?;
-        let book: OrderBook = resp.json().await.context("parse /book")?;
+        let status = resp.status();
+        let body = resp.text().await.context("read /book body")?;
+
+        if !status.is_success() {
+            return Err(anyhow!(
+                "/book failed with HTTP {}: {}",
+                status,
+                &body[..body.len().min(200)]
+            ));
+        }
+
+        let book: OrderBook = serde_json::from_str(&body).context("parse /book")?;
         Ok(book)
+    }
+
+    /// Fetch collateral (USDC) wallet balance from CLOB.
+    ///
+    /// Uses authenticated `/balance-allowance` and returns USDC-denominated
+    /// amount suitable for paper bankroll sizing.
+    pub async fn get_collateral_balance_usdc(&self) -> Result<f64> {
+        let candidates = [
+            "/balance-allowance?asset_type=COLLATERAL&signature_type=0",
+            "/balance-allowance?asset_type=COLLATERAL",
+            "/balance-allowance",
+        ];
+
+        let mut last_err: Option<anyhow::Error> = None;
+        for path in candidates {
+            match self.fetch_collateral_balance_for_path(path).await {
+                Ok(v) if v.is_finite() && v >= 0.0 => return Ok(v),
+                Ok(v) => {
+                    last_err = Some(anyhow!(
+                        "invalid collateral balance parsed from {}: {}",
+                        path,
+                        v
+                    ));
+                }
+                Err(e) => {
+                    debug!(
+                        "[Client] balance fetch via '{}' failed: {}",
+                        path,
+                        e
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow!("unable to fetch collateral balance")))
+    }
+
+    async fn fetch_collateral_balance_for_path(&self, path: &str) -> Result<f64> {
+        let headers = self.auth_headers("GET", path, "").await;
+        let mut req = self.http.get(format!("{}{}", CLOB_BASE, path));
+        for (k, v) in headers {
+            req = req.header(k, v);
+        }
+
+        let resp = req.send().await.context("GET /balance-allowance")?;
+        let status = resp.status();
+        let body = resp.text().await.context("read /balance-allowance body")?;
+
+        if !status.is_success() {
+            return Err(anyhow!(
+                "/balance-allowance failed with HTTP {}: {}",
+                status,
+                &body[..body.len().min(200)]
+            ));
+        }
+
+        let payload: Value = serde_json::from_str(&body).context("parse /balance-allowance")?;
+        Self::extract_collateral_balance_usdc(&payload)
+            .ok_or_else(|| anyhow!("balance field not found in /balance-allowance payload"))
+    }
+
+    fn extract_collateral_balance_usdc(payload: &Value) -> Option<f64> {
+        let (raw, decimals, integer_like) = Self::find_balance_candidate(payload)?;
+        Some(Self::normalize_usdc(raw, decimals, integer_like))
+    }
+
+    fn find_balance_candidate(v: &Value) -> Option<(f64, Option<u32>, bool)> {
+        const BALANCE_KEYS: &[&str] = &[
+            "available_balance",
+            "balance",
+            "collateral_balance",
+            "usdc_balance",
+            "available",
+            "amount",
+        ];
+        const DECIMAL_KEYS: &[&str] = &["decimals", "token_decimals", "asset_decimals"];
+
+        match v {
+            Value::Object(map) => {
+                for key in BALANCE_KEYS {
+                    if let Some(raw_v) = map.get(*key) {
+                        if let Some((raw, integer_like)) = Self::parse_numeric(raw_v) {
+                            let decimals = DECIMAL_KEYS
+                                .iter()
+                                .find_map(|k| map.get(*k).and_then(Self::parse_u32));
+                            return Some((raw, decimals, integer_like));
+                        }
+                    }
+                }
+
+                for child in map.values() {
+                    if let Some(found) = Self::find_balance_candidate(child) {
+                        return Some(found);
+                    }
+                }
+
+                None
+            }
+            Value::Array(arr) => arr.iter().find_map(Self::find_balance_candidate),
+            _ => None,
+        }
+    }
+
+    fn parse_numeric(v: &Value) -> Option<(f64, bool)> {
+        match v {
+            Value::Number(n) => n
+                .as_f64()
+                .map(|f| (f, n.is_i64() || n.is_u64())),
+            Value::String(s) => {
+                let t = s.trim();
+                let integer_like = !(t.contains('.') || t.contains('e') || t.contains('E'));
+                t.parse::<f64>().ok().map(|f| (f, integer_like))
+            }
+            _ => None,
+        }
+    }
+
+    fn parse_u32(v: &Value) -> Option<u32> {
+        match v {
+            Value::Number(n) => n.as_u64().and_then(|u| u.try_into().ok()),
+            Value::String(s) => s.trim().parse::<u32>().ok(),
+            _ => None,
+        }
+    }
+
+    fn normalize_usdc(raw: f64, decimals: Option<u32>, integer_like: bool) -> f64 {
+        if !raw.is_finite() || raw < 0.0 {
+            return 0.0;
+        }
+
+        if integer_like {
+            let d = decimals.unwrap_or(6).min(18);
+            let denom = 10f64.powi(d as i32);
+            if denom > 1.0 {
+                return raw / denom;
+            }
+        }
+
+        // Fallback heuristic if API returned integer micro-units without decimals metadata.
+        if raw.fract() == 0.0 && raw >= 1_000_000.0 {
+            return raw / 1_000_000.0;
+        }
+
+        raw
     }
 
     /// Raw mid-price probability from YES token order book (0.0–1.0).

@@ -244,15 +244,15 @@ impl Detector {
         let used_fallback = poly_from_agg.is_none();
         self.risk.note_poly_lookup(used_fallback);
 
-        let (poly_prob, book_depth_usdc, poly_tick_age_ms) = match poly_from_agg {
+        let (poly_prob, book_depth_usdc, poly_tick_age_ms, best_bid_prob, best_ask_prob) = match poly_from_agg {
             Some(v) => v,
             None => {
                 // Fallback to direct poll if aggregator is empty
                 match self.client.get_order_book(&slot.yes_token.token_id).await {
                     Ok(book) => {
                         let depth = Self::book_depth_usdc(&book);
-                        match book.mid_price() {
-                            Some(p) => (p, depth, 0),
+                        match book.best_bid_ask() {
+                            Some((bid, ask)) => ((bid + ask) / 2.0, depth, 0, Some(bid), Some(ask)),
                             None => {
                                 debug!(
                                     "[Detector] empty poly book ({:?}/{:?})",
@@ -267,6 +267,20 @@ impl Detector {
                 }
             }
         };
+
+        if let (Some(bid), Some(ask)) = (best_bid_prob, best_ask_prob) {
+            let spread = (ask - bid).max(0.0);
+            if spread > 0.10 {
+                debug!(
+                    "[Detector] {:?}/{:?} wide spread {:.4} (>0.10) — skip",
+                    slot.asset,
+                    slot.timeframe,
+                    spread
+                );
+                return;
+            }
+        }
+
         self.risk.note_poly_tick_age_ms(poly_tick_age_ms);
 
         let key = (format!("{:?}", slot.asset), format!("{:?}", slot.timeframe));
@@ -355,7 +369,13 @@ impl Detector {
                 });
 
                 // ── Step 8: Kelly sizing ───────────────────────────────────────
-                let entry_price = if direction_up { poly_prob } else { 1.0 - poly_prob };
+                let entry_price = if direction_up {
+                    best_ask_prob.unwrap_or(poly_prob)
+                } else {
+                    best_bid_prob
+                        .map(|bid| 1.0 - bid)
+                        .unwrap_or(1.0 - poly_prob)
+                };
                 let kelly_inp = KellyInput {
                     posterior,
                     entry_price: entry_price.clamp(0.01, 0.99),
@@ -393,6 +413,7 @@ impl Detector {
                 );
                 snap.models = model_out.clone();
                 snap.direction_up = direction_up;
+                snap.poly_entry_prob = entry_price.clamp(0.01, 0.99);
 
                 (Some(snap), model_out)
             }
@@ -453,11 +474,43 @@ impl Detector {
         };
 
         let token = if snap.direction_up { &slot.yes_token } else { &slot.no_token };
-        let entry_prob = if snap.direction_up {
-            snap.poly_implied_prob
-        } else {
-            1.0 - snap.poly_implied_prob
-        };
+        let mut entry_prob = snap.poly_entry_prob.clamp(0.01, 0.99);
+
+        // For live orders, use executable top-of-book ask on the exact token being bought.
+        if self.cfg.is_live() {
+            match self.client.get_order_book(&token.token_id).await {
+                Ok(book) => match book.best_bid_ask() {
+                    Some((bid, ask)) => {
+                        let spread = (ask - bid).max(0.0);
+                        if spread > 0.10 {
+                            warn!(
+                                "[Executor] Wide spread {:.4} on token {} — skip order",
+                                spread,
+                                token.token_id
+                            );
+                            return;
+                        }
+                        entry_prob = ask.clamp(0.01, 0.99);
+                    }
+                    None => {
+                        warn!(
+                            "[Executor] Missing best bid/ask for token {} — skip order",
+                            token.token_id
+                        );
+                        return;
+                    }
+                },
+                Err(e) => {
+                    warn!(
+                        "[Executor] Failed to refresh top-of-book ask for token {}: {}",
+                        token.token_id,
+                        e
+                    );
+                    return;
+                }
+            }
+        }
+
         let direction_str = if snap.direction_up { "UP" } else { "DOWN" };
         let asset_str = format!("{}", snap.asset);
         let tf_str = format!("{}", snap.timeframe);
@@ -538,14 +591,20 @@ impl Detector {
         None
     }
 
-    fn poly_snapshot(&self, asset: Asset, timeframe: Timeframe) -> Option<(f64, f64, i64)> {
+    fn poly_snapshot(&self, asset: Asset, timeframe: Timeframe) -> Option<(f64, f64, i64, Option<f64>, Option<f64>)> {
         if let Some(t) = self
             .latest
             .get(&(PriceSource::Polymarket, asset, Some(timeframe)))
         {
             let tick_age_ms = (Utc::now() - t.timestamp).num_milliseconds().max(0);
             if tick_age_ms <= self.polymarket_max_age_ms() {
-                return Some((t.price, t.book_depth_usdc.unwrap_or(0.0), tick_age_ms));
+                return Some((
+                    t.price,
+                    t.book_depth_usdc.unwrap_or(0.0),
+                    tick_age_ms,
+                    t.book_best_bid_prob,
+                    t.book_best_ask_prob,
+                ));
             }
         }
         None
@@ -598,18 +657,22 @@ impl Detector {
     }
 
     fn book_depth_usdc(book: &crate::polymarket::client::OrderBook) -> f64 {
-        let bid_depth: f64 = book
-            .bids
+        let mut bids = book.bids.clone();
+        bids.sort_by(|a, b| b.price.total_cmp(&a.price));
+        let bid_depth: f64 = bids
             .iter()
             .take(5)
-            .map(|l| l.price.max(0.0) * l.size.max(0.0))
+            .map(|l| l.price.clamp(0.0, 1.0) * l.size.max(0.0))
             .sum();
-        let ask_depth: f64 = book
-            .asks
+
+        let mut asks = book.asks.clone();
+        asks.sort_by(|a, b| a.price.total_cmp(&b.price));
+        let ask_depth: f64 = asks
             .iter()
             .take(5)
-            .map(|l| l.price.max(0.0) * l.size.max(0.0))
+            .map(|l| l.price.clamp(0.0, 1.0) * l.size.max(0.0))
             .sum();
+
         bid_depth + ask_depth
     }
 

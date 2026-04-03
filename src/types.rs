@@ -66,6 +66,10 @@ pub struct PriceTick {
     pub timeframe: Option<Timeframe>,
     /// Optional notional depth snapshot (USDC), primarily for Polymarket books.
     pub book_depth_usdc: Option<f64>,
+    /// Optional top-of-book best bid probability (Polymarket only).
+    pub book_best_bid_prob: Option<f64>,
+    /// Optional top-of-book best ask probability (Polymarket only).
+    pub book_best_ask_prob: Option<f64>,
     pub price: f64,
     pub timestamp: DateTime<Utc>,
 }
@@ -121,6 +125,7 @@ pub struct MarketSnapshot {
     pub timeframe: Timeframe,
     pub real_price: f64,
     pub poly_implied_prob: f64, // Polymarket mid (raw market odds)
+    pub poly_entry_prob: f64,   // Estimated taker entry probability (buy at ask)
     pub cex_implied_prob: f64,  // CEX-implied probability (logistic model)
     pub edge_pct: f64,          // |bayesian_posterior - poly_prob| * 100
     pub confidence: f64,        // multi-signal score 0–1
@@ -146,6 +151,7 @@ impl MarketSnapshot {
             timeframe,
             real_price,
             poly_implied_prob: poly_prob,
+            poly_entry_prob: poly_prob,
             cex_implied_prob: cex_prob,
             edge_pct,
             confidence,

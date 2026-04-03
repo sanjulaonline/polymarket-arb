@@ -93,7 +93,7 @@ async fn main() -> Result<()> {
     info!("  BTC | Up/Down configurable TF | Kelly | Paper-first ");
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    let cfg = Config::from_env().context("Config error")?;
+    let mut cfg = Config::from_env().context("Config error")?;
 
     // Safety check
     if cfg.is_live() {
@@ -112,6 +112,48 @@ async fn main() -> Result<()> {
 
     // Shared services
     let poly_client = Arc::new(PolymarketClient::new(&cfg)?);
+
+    if cfg.paper_trading {
+        let has_auth = !cfg.polymarket_api_key.trim().is_empty()
+            && !cfg.polymarket_api_secret.trim().is_empty()
+            && !cfg.polymarket_api_passphrase.trim().is_empty()
+            && !cfg.polymarket_api_key.eq_ignore_ascii_case("paper_mode")
+            && !cfg.polymarket_api_secret.eq_ignore_ascii_case("paper_mode")
+            && !cfg.polymarket_api_passphrase.eq_ignore_ascii_case("paper_mode");
+
+        if has_auth {
+            match poly_client.get_collateral_balance_usdc().await {
+                Ok(wallet_balance) if wallet_balance > 0.0 => {
+                    let prev = cfg.portfolio_size_usdc;
+                    cfg.portfolio_size_usdc = wallet_balance;
+                    info!(
+                        "[Init] Paper bankroll set from wallet balance: ${:.2} (PORTFOLIO_SIZE_USDC was ${:.2})",
+                        wallet_balance,
+                        prev
+                    );
+                }
+                Ok(_) => {
+                    warn!(
+                        "[Init] Wallet balance fetch returned zero; using PORTFOLIO_SIZE_USDC=${:.2}",
+                        cfg.portfolio_size_usdc
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "[Init] Wallet balance fetch failed in paper mode: {}. Using PORTFOLIO_SIZE_USDC=${:.2}",
+                        e,
+                        cfg.portfolio_size_usdc
+                    );
+                }
+            }
+        } else {
+            info!(
+                "[Init] Paper bankroll using PORTFOLIO_SIZE_USDC=${:.2} (Polymarket API credentials not configured)",
+                cfg.portfolio_size_usdc
+            );
+        }
+    }
+
     let risk = Arc::new(RiskManager::new(cfg.clone()));
     let tg = Arc::new(Telegram::new(
         cfg.enable_telegram,
