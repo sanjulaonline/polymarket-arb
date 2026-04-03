@@ -71,7 +71,7 @@ impl PolymarketPoller {
                             timestamp: Utc::now(),
                         });
                     } else {
-                        warn!(
+                        debug!(
                             "[Polymarket/{:?}/{:?}] empty or invalid top-of-book",
                             self.asset,
                             self.timeframe
