@@ -41,6 +41,7 @@ impl Database {
 
              CREATE TABLE IF NOT EXISTS trades (
                  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                 condition_id TEXT,
                  asset       TEXT    NOT NULL,
                  timeframe   TEXT    NOT NULL,
                  direction   TEXT    NOT NULL,
@@ -99,6 +100,36 @@ impl Database {
             info!("[DB] Added trades.entry_ref_price column");
         }
 
+        let has_condition_id = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(trades)")
+                .context("Failed to inspect trades schema")?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .context("Failed to read trades schema columns")?;
+
+            let mut has = false;
+            for col_name in rows {
+                if col_name
+                    .context("Failed to parse schema column")?
+                    .eq_ignore_ascii_case("condition_id")
+                {
+                    has = true;
+                    break;
+                }
+            }
+            has
+        };
+
+        if !has_condition_id {
+            conn.execute(
+                "ALTER TABLE trades ADD COLUMN condition_id TEXT",
+                [],
+            )
+            .context("Failed adding trades.condition_id")?;
+            info!("[DB] Added trades.condition_id column");
+        }
+
         info!("[DB] Schema ready");
         Ok(())
     }
@@ -111,10 +142,11 @@ impl Database {
         let conn = self.conn.as_ref().expect("db conn missing").lock().unwrap();
         conn.execute(
             "INSERT INTO trades
-             (asset, timeframe, direction, size_usdc, entry_prob, cex_prob, edge_pct,
+             (condition_id, asset, timeframe, direction, size_usdc, entry_prob, cex_prob, edge_pct,
               confidence, kelly_frac, paper, order_id, entry_ref_price, outcome, opened_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'OPEN',?13)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'OPEN',?14)",
             params![
+                t.condition_id,
                 t.asset,
                 t.timeframe,
                 t.direction,
@@ -166,7 +198,7 @@ impl Database {
         }
         let conn = self.conn.as_ref().expect("db conn missing").lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, asset, timeframe, direction, size_usdc, entry_prob, cex_prob,
+            "SELECT id, condition_id, asset, timeframe, direction, size_usdc, entry_prob, cex_prob,
                     edge_pct, confidence, kelly_frac, paper, order_id,
                     entry_ref_price, pnl_usdc, outcome, opened_at, closed_at
              FROM trades ORDER BY id DESC LIMIT ?1",
@@ -174,25 +206,26 @@ impl Database {
         let rows = stmt.query_map(params![n as i64], |row| {
             Ok(TradeRecord {
                 id: row.get(0)?,
-                asset: row.get(1)?,
-                timeframe: row.get(2)?,
-                direction: row.get(3)?,
-                entry_ref_price: row.get(12)?,
-                size_usdc: row.get(4)?,
-                entry_prob: row.get(5)?,
-                cex_prob: row.get(6)?,
-                edge_pct: row.get(7)?,
-                confidence: row.get(8)?,
-                kelly_fraction: row.get(9)?,
-                paper: row.get::<_, i32>(10)? != 0,
-                order_id: row.get(11)?,
-                pnl_usdc: row.get(13)?,
-                outcome: row.get(14)?,
+                condition_id: row.get(1)?,
+                asset: row.get(2)?,
+                timeframe: row.get(3)?,
+                direction: row.get(4)?,
+                entry_ref_price: row.get(13)?,
+                size_usdc: row.get(5)?,
+                entry_prob: row.get(6)?,
+                cex_prob: row.get(7)?,
+                edge_pct: row.get(8)?,
+                confidence: row.get(9)?,
+                kelly_fraction: row.get(10)?,
+                paper: row.get::<_, i32>(11)? != 0,
+                order_id: row.get(12)?,
+                pnl_usdc: row.get(14)?,
+                outcome: row.get(15)?,
                 opened_at: {
-                    let s: String = row.get(15)?;
+                    let s: String = row.get(16)?;
                     s.parse().unwrap_or_else(|_| Utc::now())
                 },
-                closed_at: row.get::<_, Option<String>>(16)?
+                closed_at: row.get::<_, Option<String>>(17)?
                     .and_then(|s| s.parse().ok()),
             })
         })?;
@@ -206,7 +239,7 @@ impl Database {
         }
         let conn = self.conn.as_ref().expect("db conn missing").lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, asset, timeframe, direction, size_usdc, entry_prob, cex_prob,
+            "SELECT id, condition_id, asset, timeframe, direction, size_usdc, entry_prob, cex_prob,
                     edge_pct, confidence, kelly_frac, paper, order_id,
                     entry_ref_price, pnl_usdc, outcome, opened_at, closed_at
              FROM trades WHERE outcome = 'OPEN' ORDER BY id DESC",
@@ -214,25 +247,26 @@ impl Database {
         let rows = stmt.query_map([], |row| {
             Ok(TradeRecord {
                 id: row.get(0)?,
-                asset: row.get(1)?,
-                timeframe: row.get(2)?,
-                direction: row.get(3)?,
-                entry_ref_price: row.get(12)?,
-                size_usdc: row.get(4)?,
-                entry_prob: row.get(5)?,
-                cex_prob: row.get(6)?,
-                edge_pct: row.get(7)?,
-                confidence: row.get(8)?,
-                kelly_fraction: row.get(9)?,
-                paper: row.get::<_, i32>(10)? != 0,
-                order_id: row.get(11)?,
-                pnl_usdc: row.get(13)?,
-                outcome: row.get(14)?,
+                condition_id: row.get(1)?,
+                asset: row.get(2)?,
+                timeframe: row.get(3)?,
+                direction: row.get(4)?,
+                entry_ref_price: row.get(13)?,
+                size_usdc: row.get(5)?,
+                entry_prob: row.get(6)?,
+                cex_prob: row.get(7)?,
+                edge_pct: row.get(8)?,
+                confidence: row.get(9)?,
+                kelly_fraction: row.get(10)?,
+                paper: row.get::<_, i32>(11)? != 0,
+                order_id: row.get(12)?,
+                pnl_usdc: row.get(14)?,
+                outcome: row.get(15)?,
                 opened_at: {
-                    let s: String = row.get(15)?;
+                    let s: String = row.get(16)?;
                     s.parse().unwrap_or_else(|_| Utc::now())
                 },
-                closed_at: row.get::<_, Option<String>>(16)?
+                closed_at: row.get::<_, Option<String>>(17)?
                     .and_then(|s| s.parse().ok()),
             })
         })?;

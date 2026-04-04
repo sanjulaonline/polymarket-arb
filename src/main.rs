@@ -508,6 +508,7 @@ async fn main() -> Result<()> {
         contracts.push(ContractSlot {
             asset: Asset::Btc,
             timeframe: *timeframe,
+            condition_id: market.condition_id.clone(),
             title: market.question.clone(),
             yes_token,
             no_token,

@@ -7,6 +7,7 @@ use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha3::{Digest, Keccak256};
 use sha2::Sha256;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -18,6 +19,7 @@ use crate::types::Timeframe;
 const CLOB_BASE: &str = "https://clob.polymarket.com";
 const SERVER_TIME_RESYNC_SECS: i64 = 30;
 const POLYGON_USDC_E_ADDRESS: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+const CTF_ADDRESS: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 const ERC20_BALANCE_OF_SELECTOR: &str = "70a08231";
 const USDC_E_DECIMALS: u32 = 6;
 
@@ -97,6 +99,31 @@ pub struct UpDownMarketIds {
 pub struct TokenSidePrices {
     pub best_buy: Option<f64>,
     pub best_sell: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MarketResolution {
+    pub resolved: bool,
+    pub active: Option<bool>,
+    pub question: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OnChainPayout {
+    pub resolved: bool,
+    pub payouts: Vec<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GammaResolutionMarket {
+    #[serde(default)]
+    closed: Option<bool>,
+    #[serde(default)]
+    resolved: Option<bool>,
+    #[serde(default)]
+    active: Option<bool>,
+    #[serde(default)]
+    question: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -401,6 +428,7 @@ impl PolymarketClient {
             current_bucket_start.timestamp(),
             current_bucket_start.timestamp() + interval_secs,
         ];
+        let now_ts = Utc::now().timestamp();
 
         for ts in timestamps {
             let slug = format!("{}-updown-{}-{}", asset_slug, kline_interval, ts);
@@ -424,6 +452,19 @@ impl PolymarketClient {
                 .unwrap_or(0);
 
             if expiration <= Utc::now().timestamp() {
+                continue;
+            }
+
+            // Mirror maker-mm detector behavior: do not enter a current slot if it is
+            // already stale; instead wait for the next slot market.
+            let is_current_slot = ts == current_bucket_start.timestamp();
+            let current_slot_age_secs = now_ts.saturating_sub(ts);
+            if is_current_slot && current_slot_age_secs > 15 {
+                debug!(
+                    "[Client] skipping stale current-slot slug {} (age={}s > 15s)",
+                    slug,
+                    current_slot_age_secs
+                );
                 continue;
             }
 
@@ -597,6 +638,85 @@ impl PolymarketClient {
         let best_buy = self.get_token_best_price(token_id, OrderSide::Buy).await.ok();
         let best_sell = self.get_token_best_price(token_id, OrderSide::Sell).await.ok();
         TokenSidePrices { best_buy, best_sell }
+    }
+
+    pub async fn check_market_resolution(&self, condition_id: &str) -> Result<Option<MarketResolution>> {
+        let cid = condition_id.trim();
+        if cid.is_empty() {
+            return Ok(None);
+        }
+
+        let url = "https://gamma-api.polymarket.com/markets";
+        let resp = self
+            .http
+            .get(url)
+            .query(&[("condition_id", cid)])
+            .send()
+            .await
+            .context("GET gamma markets by condition_id")?;
+
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+
+        let markets = resp
+            .json::<Vec<GammaResolutionMarket>>()
+            .await
+            .context("parse gamma resolution response")?;
+
+        let Some(m) = markets.into_iter().next() else {
+            return Ok(None);
+        };
+
+        Ok(Some(MarketResolution {
+            resolved: m.closed.unwrap_or(false) || m.resolved.unwrap_or(false),
+            active: m.active,
+            question: m.question,
+        }))
+    }
+
+    pub async fn check_onchain_payout(&self, rpc_url: &str, condition_id: &str) -> Result<OnChainPayout> {
+        let cond = Self::normalize_bytes32_hex(condition_id)?;
+
+        let denominator = self
+            .eth_call_u256(
+                rpc_url,
+                CTF_ADDRESS,
+                &Self::abi_selector("payoutDenominator(bytes32)"),
+                &[cond.to_vec()],
+            )
+            .await
+            .unwrap_or(0.0);
+
+        if denominator <= 0.0 {
+            return Ok(OnChainPayout {
+                resolved: false,
+                payouts: vec![],
+            });
+        }
+
+        let mut payouts = Vec::with_capacity(2);
+        for outcome_idx in 0u64..=1u64 {
+            let mut idx_word = [0u8; 32];
+            idx_word[24..].copy_from_slice(&outcome_idx.to_be_bytes());
+
+            let numerator = self
+                .eth_call_u256(
+                    rpc_url,
+                    CTF_ADDRESS,
+                    &Self::abi_selector("payoutNumerators(bytes32,uint256)"),
+                    &[cond.to_vec(), idx_word.to_vec()],
+                )
+                .await
+                .unwrap_or(0.0);
+
+            payouts.push((numerator / denominator).clamp(0.0, 1.0));
+        }
+
+        Ok(OnChainPayout {
+            resolved: true,
+            payouts,
+        })
     }
 
     // ── API calls ─────────────────────────────────────────────────────────────
@@ -952,6 +1072,95 @@ impl PolymarketClient {
         }
 
         Ok(hex.to_ascii_lowercase())
+    }
+
+    fn normalize_bytes32_hex(value: &str) -> Result<[u8; 32]> {
+        let trimmed = value.trim();
+        let hex = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+            .unwrap_or(trimmed);
+
+        if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(anyhow!("invalid bytes32 hex value: {}", value));
+        }
+
+        let bytes = hex::decode(hex).context("decode bytes32 hex")?;
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        Ok(out)
+    }
+
+    fn abi_selector(signature: &str) -> [u8; 4] {
+        let digest = Keccak256::digest(signature.as_bytes());
+        [digest[0], digest[1], digest[2], digest[3]]
+    }
+
+    async fn eth_call_u256(
+        &self,
+        rpc_url: &str,
+        to: &str,
+        selector: &[u8; 4],
+        words: &[Vec<u8>],
+    ) -> Result<f64> {
+        let mut payload_bytes = Vec::with_capacity(4 + words.len() * 32);
+        payload_bytes.extend_from_slice(selector);
+        for w in words {
+            if w.len() != 32 {
+                return Err(anyhow!("ABI word must be 32 bytes"));
+            }
+            payload_bytes.extend_from_slice(w);
+        }
+
+        let call_data = format!("0x{}", hex::encode(payload_bytes));
+
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_call",
+            "params": [
+                {
+                    "to": to,
+                    "data": call_data,
+                },
+                "latest"
+            ]
+        });
+
+        let resp = self
+            .http
+            .post(rpc_url)
+            .json(&payload)
+            .send()
+            .await
+            .context("POST polygon eth_call")?;
+
+        let status = resp.status();
+        let body = resp.text().await.context("read polygon eth_call body")?;
+
+        if !status.is_success() {
+            return Err(anyhow!(
+                "polygon eth_call failed with HTTP {}: {}",
+                status,
+                &body[..body.len().min(200)]
+            ));
+        }
+
+        let rpc: JsonRpcResponse =
+            serde_json::from_str(&body).context("parse polygon eth_call response")?;
+
+        if let Some(err) = rpc.error {
+            return Err(anyhow!(
+                "polygon eth_call rpc error {}: {}",
+                err.code,
+                err.message
+            ));
+        }
+
+        let raw_hex = rpc
+            .result
+            .ok_or_else(|| anyhow!("polygon eth_call response missing result"))?;
+        Self::parse_u256_hex_to_f64(&raw_hex)
     }
 
     fn parse_u256_hex_to_f64(raw_hex: &str) -> Result<f64> {

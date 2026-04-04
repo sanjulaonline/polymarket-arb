@@ -194,6 +194,7 @@ impl MarketSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeRecord {
     pub id: Option<i64>,
+    pub condition_id: Option<String>,
     pub asset: String,
     pub timeframe: String,
     pub direction: String,         // "UP" | "DOWN"

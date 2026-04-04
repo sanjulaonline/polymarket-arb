@@ -69,6 +69,7 @@ struct CompareTelemetry {
 pub struct ContractSlot {
     pub asset: Asset,
     pub timeframe: Timeframe,
+    pub condition_id: String,
     pub title: String,
     pub yes_token: Token,
     pub no_token: Token,
@@ -258,6 +259,35 @@ impl Detector {
                     if !self.cfg.is_live() {
                         if let Ok(opens) = self.db.open_positions() {
                             for open in opens {
+                                if let Some(condition_id) = open
+                                    .condition_id
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                {
+                                    let api_resolved = self
+                                        .client
+                                        .check_market_resolution(condition_id)
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                        .map(|m| m.resolved)
+                                        .unwrap_or(false);
+
+                                    if api_resolved {
+                                        if let Ok(onchain) = self
+                                            .client
+                                            .check_onchain_payout(&self.cfg.polygon_rpc_url, condition_id)
+                                            .await
+                                        {
+                                            if onchain.resolved {
+                                                self.simulate_paper_redeem_settlement(&open, &onchain.payouts).await;
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
+
                                 if let Some(price) = self.best_price(Asset::Btc) { // Assuming BTC for now
                                     // We need the strike. In up/down, it's the candle open price.
                                     // For simplicity in this fix, we'll just use a rough estimate or skip if not found.
@@ -590,8 +620,25 @@ impl Detector {
                 ("n/a".to_string(), "n/a".to_string(), "n/a".to_string())
             };
 
+            // Value targets (fair prices) implied by CEX signal.
+            let beat_yes = c.cex_prob.clamp(0.0, 1.0);
+            let beat_no = (1.0 - c.cex_prob).clamp(0.0, 1.0);
+            let yes_is_value = c.yes_ask <= beat_yes;
+            let no_is_value = no_live.map(|(_, ask, _)| ask <= beat_no);
+            let pair_ask_sum = no_live.map(|(_, ask, _)| c.yes_ask + ask);
+            let pair_edge_to_par = pair_ask_sum.map(|sum| 1.0 - sum);
+            let no_value_s = no_is_value
+                .map(|v| if v { "yes" } else { "no" })
+                .unwrap_or("n/a");
+            let pair_sum_s = pair_ask_sum
+                .map(|v| format!("{:.4}", v))
+                .unwrap_or_else(|| "n/a".to_string());
+            let pair_edge_s = pair_edge_to_par
+                .map(|v| format!("{:+.4}", v))
+                .unwrap_or_else(|| "n/a".to_string());
+
             info!(
-                "[Compare] {:?}/{:?} | binance={:.2} age={}ms strike={:.2} | YES(bid={:.4} ask={:.4} mid={:.4}) NO(bid={} ask={} mid={}) | cex_prob={:.4} bayes={:.4} price_lag={:.3}% prob_lag={:.2}pp bayes_edge={:.2}pp dir={} prefilter={}",
+                "[Compare] {:?}/{:?} | binance={:.2} age={}ms strike={:.2} | YES(bid={:.4} ask={:.4} mid={:.4}) NO(bid={} ask={} mid={}) | beat(YES<={:.4} NO<={:.4}) value(YES={} NO={}) pair(ask_sum={} edge_to_$1={}) | cex_prob={:.4} bayes={:.4} price_lag={:.3}% prob_lag={:.2}pp bayes_edge={:.2}pp dir={} prefilter={}",
                 slot.asset,
                 slot.timeframe,
                 c.binance_price,
@@ -603,6 +650,12 @@ impl Detector {
                 no_bid_s,
                 no_ask_s,
                 no_mid_s,
+                beat_yes,
+                beat_no,
+                if yes_is_value { "yes" } else { "no" },
+                no_value_s,
+                pair_sum_s,
+                pair_edge_s,
                 c.cex_prob,
                 c.bayes_posterior,
                 c.price_lag_pct,
@@ -665,7 +718,7 @@ impl Detector {
                 -record.size_usdc
             };
             if let Some(id) = record.id {
-                let _ = self.db.close_trade(id, pnl, if won { "WON" } else { "LOST" });
+                let _ = self.db.close_trade(id, pnl, if won { "WIN" } else { "LOSS" });
                 let slot_key = Self::record_state_key(record);
                 let has_more_open_for_slot = self
                     .db
@@ -690,12 +743,53 @@ impl Detector {
                     id,
                     record.asset,
                     record.timeframe,
-                    if won { "WON" } else { "LOST" },
+                    if won { "WIN" } else { "LOSS" },
                     pnl,
                     current_real_price,
                     settlement_strike
                 );
             }
+        }
+    }
+
+    async fn simulate_paper_redeem_settlement(&self, record: &TradeRecord, payouts: &[f64]) {
+        let outcome_idx = if record.direction.eq_ignore_ascii_case("UP") { 0 } else { 1 };
+        let payout_fraction = payouts.get(outcome_idx).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+        let shares = record.size_usdc / record.entry_prob.max(0.001);
+        let returned = payout_fraction * shares;
+        let pnl = returned - record.size_usdc;
+        let won = payout_fraction > 0.0;
+
+        if let Some(id) = record.id {
+            let _ = self.db.close_trade(id, pnl, if won { "WIN" } else { "LOSS" });
+            let slot_key = Self::record_state_key(record);
+            let has_more_open_for_slot = self
+                .db
+                .open_positions()
+                .map(|opens| {
+                    opens.iter().any(|t| {
+                        let key = Self::record_state_key(t);
+                        key == slot_key && t.is_open()
+                    })
+                })
+                .unwrap_or(false);
+            {
+                let mut states = self.states.lock();
+                if let Some(state) = states.get_mut(&slot_key) {
+                    state.paper_position_open = has_more_open_for_slot;
+                }
+            }
+            self.risk.release_open_exposure(record.size_usdc);
+            self.risk.record_pnl(pnl, won);
+            info!(
+                "[PaperRedeem] Settled #{} {}/{} result={} payout={:.2} pnl={:+.2}",
+                id,
+                record.asset,
+                record.timeframe,
+                if won { "WIN" } else { "LOSS" },
+                payout_fraction,
+                pnl
+            );
         }
     }
 
@@ -820,7 +914,10 @@ impl Detector {
         };
 
         let record = TradeRecord {
-            id: None, asset: asset_str.clone(), timeframe: tf_str.clone(),
+            id: None,
+            condition_id: Some(slot.condition_id.clone()),
+            asset: asset_str.clone(),
+            timeframe: tf_str.clone(),
             direction: direction_str.to_string(), size_usdc, entry_prob,
             entry_ref_price,
             cex_prob: snap.cex_implied_prob, edge_pct: snap.effective_edge_pct(),
