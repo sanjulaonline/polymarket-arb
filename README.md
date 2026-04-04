@@ -45,7 +45,7 @@ prompt spec, rewritten in Rust for sub-100ms execution, and heavily upgraded wit
 │  TradingView BTC WS ──┤──► raw_tx broadcast ──► Aggregator │
 │  TradingView ETH WS ──┤         (DashMap, staleness guards) │
 │  CryptoQuant WS ──────┘                                     │
-│  Polymarket REST 200ms poll ──────────────────────────────► │
+│  Polymarket REST 50ms poll (configurable) ────────────────► │
 └────────────────────────────┬────────────────────────────────┘
                              │ agg_tx broadcast
                              ▼
@@ -266,7 +266,7 @@ src/
 └── polymarket/
     ├── mod.rs
     ├── client.rs     — CLOB REST: HMAC auth, order book, FOK orders
-    └── poller.rs     — 200ms polling → implied price broadcast
+     └── poller.rs     — 50ms polling (configurable) → implied price broadcast
 ```
 
 ---

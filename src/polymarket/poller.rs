@@ -3,6 +3,7 @@ use chrono::Utc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
+use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, warn};
 
 use super::client::{OrderBook, PolymarketClient};
@@ -33,6 +34,7 @@ impl PolymarketPoller {
     pub async fn run(&self) -> Result<()> {
         let mut interval =
             tokio::time::interval(tokio::time::Duration::from_millis(self.interval_ms));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut active_token_id = self.token_id.clone();
         let mut last_rotate_attempt = Instant::now() - Duration::from_secs(30);
         let mut consecutive_empty_books: u32 = 0;

@@ -150,7 +150,7 @@ impl Config {
             max_order_size_usdc: parse_f64("MAX_ORDER_SIZE_USDC", 500.0)?,
             portfolio_size_usdc: parse_f64("PORTFOLIO_SIZE_USDC", 10_000.0)?,
             exec_timeout_ms: parse_u64("EXEC_TIMEOUT_MS", 5000)?,
-            poly_poll_ms: parse_u64("POLY_POLL_MS", 200)?,
+            poly_poll_ms: parse_u64("POLY_POLL_MS", 50)?,
 
             // Live trading — all three must be explicitly set to "true"
             paper_trading: parse_bool("PAPER_TRADING", true),

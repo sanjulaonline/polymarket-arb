@@ -267,6 +267,7 @@ async fn main() -> Result<()> {
         .collect::<Vec<_>>()
         .join("+");
     info!("[Init] Enabled BTC contract timeframes: {}", configured_timeframes);
+    info!("[Init] Polymarket poll cadence: {}ms", cfg.poly_poll_ms);
 
     // Shared services
     let poly_client = Arc::new(PolymarketClient::new(&cfg)?);
