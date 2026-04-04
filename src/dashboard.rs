@@ -143,7 +143,7 @@ impl Dashboard {
         let mut lag_vec: Vec<String> = self.risk.latest_lags.iter().map(|ref kv| {
             let v = *kv.value();
             if v > max_lag { max_lag = v; }
-            format!("{}: {:.2}%", kv.key(), v)
+            format!("{}: {:.3}%", kv.key(), v)
         }).collect();
         lag_vec.sort();
         let lag_str = if lag_vec.is_empty() { "Waiting...".to_string() } else { lag_vec.join(" | ") };

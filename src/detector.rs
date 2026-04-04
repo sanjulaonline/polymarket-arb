@@ -54,7 +54,8 @@ struct CompareTelemetry {
     yes_mid: f64,
     cex_prob: f64,
     bayes_posterior: f64,
-    lag_pp: f64,
+    price_lag_pct: f64,
+    prob_lag_pp: f64,
     bayes_edge_pp: f64,
     direction_up: bool,
     prefilter_pass: bool,
@@ -378,10 +379,20 @@ impl Detector {
             state.prev_poly_prob = Some(poly_prob);
 
             // ── Step 5: fast pre-filter ────────────────────────────────────────
-            let lag_pp = (cex_prob - poly_prob).abs() * 100.0;
-            self.risk.latest_lags.insert(format!("{}", slot.timeframe), lag_pp);
+            let binance_opt = self.binance_snapshot(slot.asset);
+            let poly_ws_opt = self.poly_ws_snapshot(slot.asset);
+            let price_lag_pct = if let (Some((b_px, _)), Some((p_px, _))) = (binance_opt, poly_ws_opt) {
+                if p_px > 0.0 { (b_px - p_px).abs() / p_px * 100.0 } else { 0.0 }
+            } else { 0.0 };
+
+            // Real-time pure price lag (for dashboard)
+            self.risk.latest_lags.insert(format!("{}", slot.timeframe), price_lag_pct);
+
+            let prob_lag_pp = (cex_prob - poly_prob).abs() * 100.0;
             let bayes_edge_pp = (posterior - poly_prob).abs() * 100.0;
-            let raw_predictor_pass = lag_pp >= self.cfg.lag_threshold_pp;
+
+            // Sniper uses the RAW DOLLAR PRICE lag between Binance and Poly's underlying resolution feed!
+            let raw_predictor_pass = price_lag_pct >= self.cfg.lag_threshold_pp;
             let quant_predictor_pass = bayes_edge_pp >= self.cfg.min_edge_pct;
             let prefilter_pass = raw_predictor_pass || quant_predictor_pass;
 
@@ -413,7 +424,8 @@ impl Detector {
                     yes_mid: poly_prob,
                     cex_prob,
                     bayes_posterior: posterior,
-                    lag_pp,
+                    price_lag_pct,
+                    prob_lag_pp,
                     bayes_edge_pp,
                     direction_up,
                     prefilter_pass,
@@ -425,8 +437,8 @@ impl Detector {
             };
 
             if !prefilter_pass {
-                debug!("[Detector] {:?}/{:?} lag={:.1}pp bayes_edge={:.1}pp — skip",
-                    slot.asset, slot.timeframe, lag_pp, bayes_edge_pp);
+                debug!("[Detector] {:?}/{:?} price_lag={:.3}% prob_lag={:.1}pp bayes_edge={:.1}pp — skip",
+                    slot.asset, slot.timeframe, price_lag_pct, prob_lag_pp, bayes_edge_pp);
                 (None, ModelOutput::default(), compare_log)
             } else {
                 // ── Step 6: confidence score ───────────────────────────────────
@@ -470,6 +482,21 @@ impl Detector {
                     kelly_out.size_usdc = self.cfg.portfolio_size_usdc * (self.cfg.risk_pct_per_trade / 100.0);
                     "SNIPER"
                 } else {
+                    // ── STOIKOV RESERVATION GATE ──
+                    // If predicting UP, we buy YES at entry_price. Must be <= reservation_price.
+                    // If predicting DOWN, we buy NO at (1 - entry_price). Must be <= (1 - reservation_price).
+                    // => entry_price >= reservation_price
+                    let stoikov_pass = if direction_up {
+                        entry_price <= stoikov_out.reservation_price
+                    } else {
+                        entry_price >= stoikov_out.reservation_price
+                    };
+
+                    if !stoikov_pass {
+                        // Stoikov blocks the trade due to adverse inventory risk!
+                        kelly_out.has_edge = false;
+                    }
+                    
                     "QUANT"
                 };
 
@@ -557,7 +584,7 @@ impl Detector {
             };
 
             info!(
-                "[Compare] {:?}/{:?} | binance={:.2} age={}ms strike={:.2} | YES(bid={:.4} ask={:.4} mid={:.4}) NO(bid={} ask={} mid={}) | cex_prob={:.4} bayes={:.4} lag={:.2}pp bayes_edge={:.2}pp dir={} prefilter={}",
+                "[Compare] {:?}/{:?} | binance={:.2} age={}ms strike={:.2} | YES(bid={:.4} ask={:.4} mid={:.4}) NO(bid={} ask={} mid={}) | cex_prob={:.4} bayes={:.4} price_lag={:.3}% prob_lag={:.2}pp bayes_edge={:.2}pp dir={} prefilter={}",
                 slot.asset,
                 slot.timeframe,
                 c.binance_price,
@@ -571,7 +598,8 @@ impl Detector {
                 no_mid_s,
                 c.cex_prob,
                 c.bayes_posterior,
-                c.lag_pp,
+                c.price_lag_pct,
+                c.prob_lag_pp,
                 c.bayes_edge_pp,
                 if c.direction_up { "UP" } else { "DOWN" },
                 if c.prefilter_pass { "pass" } else { "fail" },
@@ -928,6 +956,15 @@ impl Detector {
     fn binance_snapshot(&self, asset: Asset) -> Option<(f64, i64)> {
         self.latest
             .get(&(PriceSource::Binance, asset, None))
+            .map(|t| {
+                let age_ms = (Utc::now() - t.timestamp).num_milliseconds().max(0);
+                (t.price, age_ms)
+            })
+    }
+
+    fn poly_ws_snapshot(&self, asset: Asset) -> Option<(f64, i64)> {
+        self.latest
+            .get(&(PriceSource::PolymarketWs, asset, None))
             .map(|t| {
                 let age_ms = (Utc::now() - t.timestamp).num_milliseconds().max(0);
                 (t.price, age_ms)
