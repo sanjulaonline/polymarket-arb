@@ -171,6 +171,67 @@ fn polygon_rpc_candidates(cfg: &Config) -> Vec<String> {
     out
 }
 
+fn short_token(token_id: &str) -> String {
+    if token_id.len() <= 14 {
+        return token_id.to_string();
+    }
+    format!("{}...{}", &token_id[..6], &token_id[token_id.len() - 6..])
+}
+
+fn top_book_depth_usdc(book: &polymarket::client::OrderBook) -> f64 {
+    let mut bids = book.bids.clone();
+    bids.sort_by(|a, b| b.price.total_cmp(&a.price));
+    let bid_depth: f64 = bids
+        .iter()
+        .take(5)
+        .map(|l| l.price.clamp(0.0, 1.0) * l.size.max(0.0))
+        .sum();
+
+    let mut asks = book.asks.clone();
+    asks.sort_by(|a, b| a.price.total_cmp(&b.price));
+    let ask_depth: f64 = asks
+        .iter()
+        .take(5)
+        .map(|l| l.price.clamp(0.0, 1.0) * l.size.max(0.0))
+        .sum();
+
+    bid_depth + ask_depth
+}
+
+async fn log_book_snapshot(client: &Arc<PolymarketClient>, label: &str, token_id: &str) {
+    match client.get_order_book(token_id).await {
+        Ok(book) => {
+            if let Some((bid, ask)) = book.best_bid_ask() {
+                let mid = (bid + ask) / 2.0;
+                let spread = (ask - bid).max(0.0);
+                let depth = top_book_depth_usdc(&book);
+                info!(
+                    "[Init] {} book | token={} bid={:.4} ask={:.4} mid={:.4} spread={:.4} depth=${:.2}",
+                    label,
+                    short_token(token_id),
+                    bid,
+                    ask,
+                    mid,
+                    spread,
+                    depth
+                );
+            } else {
+                warn!(
+                    "[Init] {} book has no valid top-of-book | token={}",
+                    label,
+                    short_token(token_id)
+                );
+            }
+        }
+        Err(e) => warn!(
+            "[Init] {} book fetch failed | token={} | {}",
+            label,
+            short_token(token_id),
+            e
+        ),
+    }
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -344,6 +405,32 @@ async fn main() -> Result<()> {
             .with_context(|| format!("Failed to fetch BTC {} market", timeframe))?;
         info!("[Init] BTC {}: \"{}\"", timeframe, market.question);
 
+        let slug = market
+            .market_slug
+            .as_deref()
+            .unwrap_or("n/a");
+        let end_date = market
+            .end_date_iso
+            .as_deref()
+            .unwrap_or("n/a");
+        info!(
+            "[Init] Market details | tf={} condition_id={} slug={} active={} closed={} end_date={}",
+            timeframe,
+            market.condition_id,
+            slug,
+            market.active,
+            market.closed,
+            end_date
+        );
+
+        let token_line = market
+            .tokens
+            .iter()
+            .map(|t| format!("{}={}", t.outcome, short_token(&t.token_id)))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        info!("[Init] Market tokens | {}", token_line);
+
         let yes_token = market
             .tokens
             .iter()
@@ -356,6 +443,9 @@ async fn main() -> Result<()> {
             .find(|t| t.outcome.eq_ignore_ascii_case("no"))
             .cloned()
             .with_context(|| format!("No NO token in BTC {} market", timeframe))?;
+
+        log_book_snapshot(&poly_client, &format!("BTC {} YES", timeframe), &yes_token.token_id).await;
+        log_book_snapshot(&poly_client, &format!("BTC {} NO", timeframe), &no_token.token_id).await;
 
         contracts.push(ContractSlot {
             asset: Asset::Btc,

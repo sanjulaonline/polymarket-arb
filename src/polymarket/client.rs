@@ -36,6 +36,10 @@ pub struct Market {
     pub question: String,
     pub tokens: Vec<Token>,
     #[serde(default)]
+    pub market_slug: Option<String>,
+    #[serde(default)]
+    pub end_date_iso: Option<String>,
+    #[serde(default)]
     pub active: bool,
     #[serde(default)]
     pub closed: bool,
@@ -388,15 +392,25 @@ impl PolymarketClient {
 
             if let (Some(yes), Some(no)) = (yes_token, no_token) {
                 info!(
-                    "[Client] Found {} {} market via gamma slug {}",
+                    "[Client] Found {} {} market via gamma slug {} | yes_token={} | no_token={} | end_date={}",
                     asset_slug.to_uppercase(),
                     kline_interval,
-                    slug
+                    slug,
+                    yes,
+                    no,
+                    m.end_date.as_deref().unwrap_or("unknown")
+                );
+
+                info!(
+                    "[Client] Market title: {}",
+                    if event.title.is_empty() { slug.clone() } else { event.title.clone() }
                 );
 
                 return Ok(Market {
                     condition_id: slug.clone(),
                     question: if event.title.is_empty() { slug } else { event.title.clone() },
+                    market_slug: Some(format!("{}-updown-{}", asset_slug, kline_interval)),
+                    end_date_iso: m.end_date.clone(),
                     tokens: vec![
                         Token {
                             token_id: yes,
