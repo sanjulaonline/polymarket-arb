@@ -177,10 +177,38 @@ impl TradingViewFeed {
             return None;
         }
         let v: Value = serde_json::from_str(&payload).ok()?;
-        if v.get("m")?.as_str()? != "qsd" { return None; }
-        let p = v.get("p")?.as_array()?;
-        let lp = p.get(1)?.get("v")?.get("lp")?.as_f64()?;
-        if lp > 0.0 { Some(lp) } else { None }
+        if v.get("m")?.as_str()? != "qsd" {
+            return None;
+        }
+
+        let p = v.get("p")?;
+        let quote_obj = match p {
+            // Common shape: {"m":"qsd","p":["SYMBOL",{"v":{"lp":123.45}}]}
+            Value::Array(arr) => arr.get(1)?,
+            // Occasionally delivered as object payload.
+            Value::Object(_) => p,
+            _ => return None,
+        };
+
+        let lp = quote_obj
+            .get("v")
+            .and_then(|v| v.get("lp"))
+            .and_then(Self::value_to_f64)
+            .or_else(|| quote_obj.get("lp").and_then(Self::value_to_f64))?;
+
+        if lp > 0.0 {
+            Some(lp)
+        } else {
+            None
+        }
+    }
+
+    fn value_to_f64(v: &Value) -> Option<f64> {
+        match v {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => s.parse::<f64>().ok(),
+            _ => None,
+        }
     }
 
     async fn send_msg(

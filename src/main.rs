@@ -87,6 +87,24 @@ fn fmt_tick(
     }
 }
 
+fn fmt_tick_with_spot_fallback(
+    latest: &Arc<DashMap<FeedKey, PriceTick>>,
+    source: PriceSource,
+    asset: Asset,
+) -> String {
+    if let Some(t) = latest.get(&(source, asset, None)) {
+        let age_ms = (Utc::now() - t.timestamp).num_milliseconds().max(0);
+        return format!("{:.2} age={}ms", t.price, age_ms);
+    }
+
+    if let Some(t) = latest.get(&(PriceSource::Binance, asset, None)) {
+        let age_ms = (Utc::now() - t.timestamp).num_milliseconds().max(0);
+        return format!("{:.2} age={}ms proxy=binance", t.price, age_ms);
+    }
+
+    "n/a".to_string()
+}
+
 async fn stats_printer(
     risk: Arc<RiskManager>,
     latest: Arc<DashMap<FeedKey, PriceTick>>,
@@ -111,8 +129,8 @@ async fn stats_printer(
 
         let btc_binance = fmt_tick(&latest, PriceSource::Binance, Asset::Btc, None);
         let btc_poly_ws = fmt_tick(&latest, PriceSource::PolymarketWs, Asset::Btc, None);
-        let btc_tv = fmt_tick(&latest, PriceSource::TradingView, Asset::Btc, None);
-        let btc_cq = fmt_tick(&latest, PriceSource::CryptoQuant, Asset::Btc, None);
+        let btc_tv = fmt_tick_with_spot_fallback(&latest, PriceSource::TradingView, Asset::Btc);
+        let btc_cq = fmt_tick_with_spot_fallback(&latest, PriceSource::CryptoQuant, Asset::Btc);
         let poly_parts = tracked_timeframes
             .iter()
             .map(|tf| {
