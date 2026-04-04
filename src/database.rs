@@ -52,6 +52,7 @@ impl Database {
                  kelly_frac  REAL    NOT NULL,
                  paper       INTEGER NOT NULL DEFAULT 1,
                  order_id    TEXT,
+                 entry_ref_price REAL,
                  pnl_usdc    REAL,
                  outcome     TEXT    DEFAULT 'OPEN',
                  opened_at   TEXT    NOT NULL,
@@ -67,6 +68,37 @@ impl Database {
             ",
         )
         .context("Schema migration failed")?;
+
+        let has_entry_ref_price = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(trades)")
+                .context("Failed to inspect trades schema")?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .context("Failed to read trades schema columns")?;
+
+            let mut has = false;
+            for col_name in rows {
+                if col_name
+                    .context("Failed to parse schema column")?
+                    .eq_ignore_ascii_case("entry_ref_price")
+                {
+                    has = true;
+                    break;
+                }
+            }
+            has
+        };
+
+        if !has_entry_ref_price {
+            conn.execute(
+                "ALTER TABLE trades ADD COLUMN entry_ref_price REAL",
+                [],
+            )
+            .context("Failed adding trades.entry_ref_price")?;
+            info!("[DB] Added trades.entry_ref_price column");
+        }
+
         info!("[DB] Schema ready");
         Ok(())
     }
@@ -80,8 +112,8 @@ impl Database {
         conn.execute(
             "INSERT INTO trades
              (asset, timeframe, direction, size_usdc, entry_prob, cex_prob, edge_pct,
-              confidence, kelly_frac, paper, order_id, outcome, opened_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'OPEN',?12)",
+              confidence, kelly_frac, paper, order_id, entry_ref_price, outcome, opened_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'OPEN',?13)",
             params![
                 t.asset,
                 t.timeframe,
@@ -94,6 +126,7 @@ impl Database {
                 t.kelly_fraction,
                 t.paper as i32,
                 t.order_id,
+                t.entry_ref_price,
                 t.opened_at.to_rfc3339(),
             ],
         )?;
@@ -135,7 +168,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, asset, timeframe, direction, size_usdc, entry_prob, cex_prob,
                     edge_pct, confidence, kelly_frac, paper, order_id,
-                    pnl_usdc, outcome, opened_at, closed_at
+                    entry_ref_price, pnl_usdc, outcome, opened_at, closed_at
              FROM trades ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![n as i64], |row| {
@@ -144,6 +177,7 @@ impl Database {
                 asset: row.get(1)?,
                 timeframe: row.get(2)?,
                 direction: row.get(3)?,
+                entry_ref_price: row.get(12)?,
                 size_usdc: row.get(4)?,
                 entry_prob: row.get(5)?,
                 cex_prob: row.get(6)?,
@@ -152,13 +186,13 @@ impl Database {
                 kelly_fraction: row.get(9)?,
                 paper: row.get::<_, i32>(10)? != 0,
                 order_id: row.get(11)?,
-                pnl_usdc: row.get(12)?,
-                outcome: row.get(13)?,
+                pnl_usdc: row.get(13)?,
+                outcome: row.get(14)?,
                 opened_at: {
-                    let s: String = row.get(14)?;
+                    let s: String = row.get(15)?;
                     s.parse().unwrap_or_else(|_| Utc::now())
                 },
-                closed_at: row.get::<_, Option<String>>(15)?
+                closed_at: row.get::<_, Option<String>>(16)?
                     .and_then(|s| s.parse().ok()),
             })
         })?;
@@ -174,7 +208,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, asset, timeframe, direction, size_usdc, entry_prob, cex_prob,
                     edge_pct, confidence, kelly_frac, paper, order_id,
-                    pnl_usdc, outcome, opened_at, closed_at
+                    entry_ref_price, pnl_usdc, outcome, opened_at, closed_at
              FROM trades WHERE outcome = 'OPEN' ORDER BY id DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -183,6 +217,7 @@ impl Database {
                 asset: row.get(1)?,
                 timeframe: row.get(2)?,
                 direction: row.get(3)?,
+                entry_ref_price: row.get(12)?,
                 size_usdc: row.get(4)?,
                 entry_prob: row.get(5)?,
                 cex_prob: row.get(6)?,
@@ -191,13 +226,13 @@ impl Database {
                 kelly_fraction: row.get(9)?,
                 paper: row.get::<_, i32>(10)? != 0,
                 order_id: row.get(11)?,
-                pnl_usdc: row.get(12)?,
-                outcome: row.get(13)?,
+                pnl_usdc: row.get(13)?,
+                outcome: row.get(14)?,
                 opened_at: {
-                    let s: String = row.get(14)?;
+                    let s: String = row.get(15)?;
                     s.parse().unwrap_or_else(|_| Utc::now())
                 },
-                closed_at: row.get::<_, Option<String>>(15)?
+                closed_at: row.get::<_, Option<String>>(16)?
                     .and_then(|s| s.parse().ok()),
             })
         })?;

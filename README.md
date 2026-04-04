@@ -115,6 +115,16 @@ BINANCE_SIGNAL_THRESHOLD_PCT=0.01
 This logs sample-style momentum messages from closed BTC 1s candles:
 `[BinanceSignal] BTC 1s UP ...` / `[BinanceSignal] BTC 1s DOWN ...`
 
+Anti-overtrading safety knobs (in `.env`):
+
+```env
+MIN_TRADE_INTERVAL_MS=5000
+PAPER_SINGLE_POSITION_PER_SLOT=true
+```
+
+These reduce entry spam by enforcing a per-slot cooldown and (in paper mode)
+allowing only one open position per `(asset,timeframe)` slot.
+
 Optional Polymarket live Chainlink reference feed knobs (in `.env`):
 
 ```env

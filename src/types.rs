@@ -190,6 +190,8 @@ pub struct TradeRecord {
     pub asset: String,
     pub timeframe: String,
     pub direction: String,         // "UP" | "DOWN"
+    /// Entry-time reference strike used for paper settlement (up/down contracts)
+    pub entry_ref_price: Option<f64>,
     pub size_usdc: f64,
     pub entry_prob: f64,
     pub cex_prob: f64,

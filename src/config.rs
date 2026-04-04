@@ -63,6 +63,10 @@ pub struct Config {
     pub max_order_size_usdc: f64,
     /// Minimum approved trade size in USDC
     pub min_trade_size_usdc: f64,
+    /// Minimum milliseconds between new entries per (asset,timeframe) slot
+    pub min_trade_interval_ms: u64,
+    /// In paper mode, allow only one open position per slot (asset/timeframe)
+    pub paper_single_position_per_slot: bool,
     /// Portfolio size in USDC (for risk calculations)
     pub portfolio_size_usdc: f64,
     /// Execution timeout in ms
@@ -159,6 +163,8 @@ impl Config {
             risk_pct_per_trade: parse_f64("RISK_PCT_PER_TRADE", 0.5)?,
             max_order_size_usdc: parse_f64("MAX_ORDER_SIZE_USDC", 500.0)?,
             min_trade_size_usdc: parse_f64("MIN_TRADE_SIZE_USDC", 0.05)?,
+            min_trade_interval_ms: parse_u64("MIN_TRADE_INTERVAL_MS", 5000)?,
+            paper_single_position_per_slot: parse_bool("PAPER_SINGLE_POSITION_PER_SLOT", true),
             portfolio_size_usdc: parse_f64("PORTFOLIO_SIZE_USDC", 10_000.0)?,
             exec_timeout_ms: parse_u64("EXEC_TIMEOUT_MS", 5000)?,
             poly_poll_ms: parse_u64("POLY_POLL_MS", 50)?,

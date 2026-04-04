@@ -111,6 +111,10 @@ struct SlotState {
     active_no_token_id: Option<String>,
     /// Last attempt time to refresh NO token mapping for this slot
     last_no_token_refresh: Option<Instant>,
+    /// Last time we opened a trade on this slot
+    last_trade_at: Option<Instant>,
+    /// Whether there is an open paper position for this slot
+    paper_position_open: bool,
 }
 
 impl SlotState {
@@ -144,6 +148,8 @@ impl SlotState {
             last_compare_log: None,
             active_no_token_id: None,
             last_no_token_refresh: None,
+            last_trade_at: None,
+            paper_position_open: false,
         }
     }
 
@@ -168,7 +174,7 @@ pub struct Detector {
     tg: Arc<Telegram>,
     contracts: Vec<ContractSlot>,
     latest: Arc<DashMap<(PriceSource, Asset, Option<Timeframe>), PriceTick>>,
-    /// Per-slot model state, keyed by (asset_str, timeframe_str)
+    /// Per-slot model state, keyed by (asset_display, timeframe_display)
     states: Mutex<HashMap<(String, String), SlotState>>,
 }
 
@@ -248,7 +254,7 @@ impl Detector {
                                     // For simplicity in this fix, we'll just use a rough estimate or skip if not found.
                                     let strike = {
                                         let states = self.states.lock();
-                                        let key = (open.asset.clone(), open.timeframe.clone());
+                                        let key = Self::record_state_key(&open);
                                         states.get(&key).and_then(|s| s.candle_open_price).unwrap_or(price)
                                     };
                                     self.simulate_paper_settlement(&open, price, strike).await;
@@ -312,7 +318,7 @@ impl Detector {
             }
         }
 
-        let key = (format!("{:?}", slot.asset), format!("{:?}", slot.timeframe));
+        let key = Self::slot_state_key(slot.asset, slot.timeframe);
         let timeframe_mins = match slot.timeframe { Timeframe::FiveMin => 5, Timeframe::FifteenMin => 15 };
 
         // All model state updates happen inside this lock scope
@@ -519,7 +525,7 @@ impl Detector {
             }
 
             if c.allow_no_token_refresh || refreshed_no_token_id.is_some() {
-                let key = (format!("{:?}", slot.asset), format!("{:?}", slot.timeframe));
+                let key = Self::slot_state_key(slot.asset, slot.timeframe);
                 let mut states = self.states.lock();
                 if let Some(state) = states.get_mut(&key) {
                     state.last_no_token_refresh = Some(Instant::now());
@@ -593,23 +599,115 @@ impl Detector {
         let limit_secs = if record.timeframe.contains("5m") { 300 } else { 900 };
         
         if elapsed.num_seconds() >= limit_secs {
-            let won = if record.direction == "UP" {
-                current_real_price > strike
+            // Prefer the persisted entry reference strike for accurate up/down settlement.
+            let settlement_strike = record.entry_ref_price.unwrap_or(strike);
+            let won = if record.direction.eq_ignore_ascii_case("UP") {
+                current_real_price > settlement_strike
             } else {
-                current_real_price < strike
+                current_real_price < settlement_strike
             };
             
             let pnl = if won { record.size_usdc * 0.9 } else { -record.size_usdc };
             if let Some(id) = record.id {
                 let _ = self.db.close_trade(id, pnl, if won { "WON" } else { "LOST" });
+                let slot_key = Self::record_state_key(record);
+                let has_more_open_for_slot = self
+                    .db
+                    .open_positions()
+                    .map(|opens| {
+                        opens.iter().any(|t| {
+                            let key = Self::record_state_key(t);
+                            key == slot_key && t.is_open()
+                        })
+                    })
+                    .unwrap_or(false);
+                {
+                    let mut states = self.states.lock();
+                    if let Some(state) = states.get_mut(&slot_key) {
+                        state.paper_position_open = has_more_open_for_slot;
+                    }
+                }
                 self.risk.release_open_exposure(record.size_usdc);
                 self.risk.record_pnl(pnl, won);
-                info!("[Paper] Settled #{} {}/{} result={} pnl={:+.2}", id, record.asset, record.timeframe, if won { "WON" } else { "LOST" }, pnl);
+                info!(
+                    "[Paper] Settled #{} {}/{} result={} pnl={:+.2} px={:.2} strike={:.2}",
+                    id,
+                    record.asset,
+                    record.timeframe,
+                    if won { "WON" } else { "LOST" },
+                    pnl,
+                    current_real_price,
+                    settlement_strike
+                );
             }
         }
     }
 
     async fn execute(&self, slot: &ContractSlot, snap: &MarketSnapshot) {
+        let slot_key = Self::slot_state_key(slot.asset, slot.timeframe);
+
+        if self.cfg.min_trade_interval_ms > 0 {
+            let min_interval = Duration::from_millis(self.cfg.min_trade_interval_ms);
+            let throttled = {
+                let states = self.states.lock();
+                states
+                    .get(&slot_key)
+                    .and_then(|s| s.last_trade_at)
+                    .map(|t| t.elapsed() < min_interval)
+                    .unwrap_or(false)
+            };
+
+            if throttled {
+                debug!(
+                    "[Executor] Entry throttled for {:?}/{:?} (MIN_TRADE_INTERVAL_MS={}ms)",
+                    slot.asset,
+                    slot.timeframe,
+                    self.cfg.min_trade_interval_ms
+                );
+                return;
+            }
+        }
+
+        if !self.cfg.is_live() && self.cfg.paper_single_position_per_slot {
+            let in_memory_open = {
+                let states = self.states.lock();
+                states
+                    .get(&slot_key)
+                    .map(|s| s.paper_position_open)
+                    .unwrap_or(false)
+            };
+
+            let db_open_for_slot = self
+                .db
+                .open_positions()
+                .map(|opens| {
+                    let asset = slot.asset.to_string();
+                    let timeframe = slot.timeframe.to_string();
+                    opens.iter().any(|t| {
+                        t.is_open()
+                            && t.asset.eq_ignore_ascii_case(&asset)
+                            && t.timeframe.eq_ignore_ascii_case(&timeframe)
+                    })
+                })
+                .unwrap_or(false);
+
+            if db_open_for_slot && !in_memory_open {
+                let mut states = self.states.lock();
+                if let Some(state) = states.get_mut(&slot_key) {
+                    state.paper_position_open = true;
+                }
+            }
+
+            if in_memory_open || db_open_for_slot {
+                debug!(
+                    "[Executor] Existing open paper position for {:?}/{:?} — skip",
+                    slot.asset,
+                    slot.timeframe
+                );
+                return;
+            }
+        }
+
         let size_usdc = match self.risk.approve_trade(snap.models.kelly_size_usdc) {
             Some(s) => s,
             None => { warn!("[Executor] Blocked by risk manager"); return; }
@@ -656,10 +754,19 @@ impl Detector {
         let direction_str = if snap.direction_up { "UP" } else { "DOWN" };
         let asset_str = format!("{}", snap.asset);
         let tf_str = format!("{}", snap.timeframe);
+        let entry_ref_price = {
+            let key = Self::slot_state_key(slot.asset, slot.timeframe);
+            let states = self.states.lock();
+            states
+                .get(&key)
+                .and_then(|s| s.candle_open_price)
+                .or(Some(snap.real_price))
+        };
 
         let record = TradeRecord {
             id: None, asset: asset_str.clone(), timeframe: tf_str.clone(),
             direction: direction_str.to_string(), size_usdc, entry_prob,
+            entry_ref_price,
             cex_prob: snap.cex_implied_prob, edge_pct: snap.effective_edge_pct(),
             confidence: snap.confidence, kelly_fraction: self.cfg.kelly_fraction,
             paper: !self.cfg.is_live(), order_id: None, pnl_usdc: None,
@@ -670,6 +777,13 @@ impl Detector {
         if !self.cfg.is_live() {
             let row_id = self.db.insert_trade(&record).unwrap_or(0);
             self.risk.reserve_open_exposure(size_usdc);
+            {
+                let mut states = self.states.lock();
+                if let Some(state) = states.get_mut(&slot_key) {
+                    state.last_trade_at = Some(Instant::now());
+                    state.paper_position_open = true;
+                }
+            }
             info!(
                 "[Paper] #{row_id} {asset_str}/{tf_str} {direction_str} ${size_usdc:.2} \
                  bayes={:.4} r={:.4} kelly_f={:.3} edge={:.1}%",
@@ -698,9 +812,9 @@ impl Detector {
 
                 // Record fill in Stoikov inventory
                 {
-                    let key = (format!("{:?}", slot.asset), format!("{:?}", slot.timeframe));
                     let mut states = self.states.lock();
-                    if let Some(state) = states.get_mut(&key) {
+                    if let Some(state) = states.get_mut(&slot_key) {
+                        state.last_trade_at = Some(Instant::now());
                         state.stoikov.record_fill(shares, size_usdc, snap.direction_up);
                     }
                 }
@@ -840,6 +954,28 @@ impl Detector {
             .sum();
 
         bid_depth + ask_depth
+    }
+
+    fn slot_state_key(asset: Asset, timeframe: Timeframe) -> (String, String) {
+        (asset.to_string(), timeframe.to_string())
+    }
+
+    fn record_state_key(record: &TradeRecord) -> (String, String) {
+        let asset = if record.asset.eq_ignore_ascii_case("btc") {
+            "BTC".to_string()
+        } else if record.asset.eq_ignore_ascii_case("eth") {
+            "ETH".to_string()
+        } else {
+            record.asset.clone()
+        };
+
+        let tf = match record.timeframe.to_ascii_lowercase().as_str() {
+            "5m" | "fivemin" | "five_min" | "five-minute" => "5m".to_string(),
+            "15m" | "fifteenmin" | "fifteen_min" | "fifteen-minute" => "15m".to_string(),
+            _ => record.timeframe.clone(),
+        };
+
+        (asset, tf)
     }
 
     fn updown_reference_strike(

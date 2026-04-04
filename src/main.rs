@@ -276,6 +276,11 @@ async fn main() -> Result<()> {
         .join("+");
     info!("[Init] Enabled BTC contract timeframes: {}", configured_timeframes);
     info!("[Init] Polymarket poll cadence: {}ms", cfg.poly_poll_ms);
+    info!(
+        "[Init] Entry guardrails: MIN_TRADE_INTERVAL_MS={} | PAPER_SINGLE_POSITION_PER_SLOT={}",
+        cfg.min_trade_interval_ms,
+        cfg.paper_single_position_per_slot
+    );
 
     // Shared services
     let poly_client = Arc::new(PolymarketClient::new(&cfg)?);
