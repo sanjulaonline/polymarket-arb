@@ -225,8 +225,11 @@ impl Detector {
 
                     if self.risk.is_halted() { continue; }
 
-                    // Evaluate only on Polymarket contract ticks.
-                    if tick.source != PriceSource::Polymarket {
+                    // Evaluate instantly on fast feeds to catch lag spikes <100ms
+                    if !matches!(
+                        tick.source,
+                        PriceSource::Polymarket | PriceSource::Binance | PriceSource::PolymarketWs
+                    ) {
                         continue;
                     }
 
