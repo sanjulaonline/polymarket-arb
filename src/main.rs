@@ -113,9 +113,6 @@ async fn stats_printer(
         let btc_poly_ws = fmt_tick(&latest, PriceSource::PolymarketWs, Asset::Btc, None);
         let btc_tv = fmt_tick(&latest, PriceSource::TradingView, Asset::Btc, None);
         let btc_cq = fmt_tick(&latest, PriceSource::CryptoQuant, Asset::Btc, None);
-        let eth_binance = fmt_tick(&latest, PriceSource::Binance, Asset::Eth, None);
-        let eth_tv = fmt_tick(&latest, PriceSource::TradingView, Asset::Eth, None);
-
         let poly_parts = tracked_timeframes
             .iter()
             .map(|tf| {
@@ -129,13 +126,11 @@ async fn stats_printer(
             .join(" | ");
 
         info!(
-            "[Tape] BTC(binance={}, poly_ws={}, tv={}, cq={}) | ETH(binance={}, tv={}) | POLY({})",
+            "[Tape] BTC(binance={}, poly_ws={}, tv={}, cq={}) | POLY({})",
             btc_binance,
             btc_poly_ws,
             btc_tv,
             btc_cq,
-            eth_binance,
-            eth_tv,
             poly_parts
         );
     }
