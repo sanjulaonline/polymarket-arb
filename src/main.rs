@@ -92,7 +92,7 @@ async fn stats_printer(
     latest: Arc<DashMap<FeedKey, PriceTick>>,
     tracked_timeframes: Vec<Timeframe>,
 ) {
-    let mut iv = tokio::time::interval(tokio::time::Duration::from_secs(10));
+    let mut iv = tokio::time::interval(tokio::time::Duration::from_millis(10));
     loop {
         iv.tick().await;
         let (pnl, trades, wr, halted) = risk.snapshot();

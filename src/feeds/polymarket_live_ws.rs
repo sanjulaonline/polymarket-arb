@@ -1,7 +1,7 @@
 /// Polymarket live-data websocket feed for Chainlink reference prices.
 /// Topic: crypto_prices_chainlink
 use anyhow::Result;
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
@@ -132,20 +132,9 @@ impl PolymarketLiveWsFeed {
             .or_else(|| payload.get("current").and_then(Self::to_f64))
             .or_else(|| payload.get("data").and_then(Self::to_f64))?;
 
-        let updated_ms = payload
-            .get("timestamp")
-            .and_then(Self::to_f64)
-            .map(Self::epoch_to_ms)
-            .or_else(|| {
-                payload
-                    .get("updatedAt")
-                    .and_then(Self::to_f64)
-                    .map(Self::epoch_to_ms)
-            });
-
-        let timestamp = updated_ms
-            .and_then(|ms| Utc.timestamp_millis_opt(ms).single())
-            .unwrap_or_else(Utc::now);
+        // Use local receive time so age in logs reflects ingestion latency at the bot,
+        // not provider-side update cadence embedded in payload timestamps.
+        let timestamp = Utc::now();
 
         Some(PriceTick {
             source: PriceSource::PolymarketWs,
@@ -181,11 +170,4 @@ impl PolymarketLiveWsFeed {
         }
     }
 
-    fn epoch_to_ms(value: f64) -> i64 {
-        if value > 10_000_000_000.0 {
-            value as i64
-        } else {
-            (value * 1000.0) as i64
-        }
-    }
 }
