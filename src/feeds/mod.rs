@@ -32,17 +32,25 @@ impl PriceAggregator {
     }
 
     pub async fn run(&self, mut rx: broadcast::Receiver<PriceTick>) -> Result<()> {
-        while let Ok(tick) = rx.recv().await {
-            if tick.source == PriceSource::Polymarket {
-                debug!("[Aggregator] {} {} prob={:.4}", tick.source, tick.asset, tick.price);
-            } else {
-                debug!("[Aggregator] {} {} price={:.2}", tick.source, tick.asset, tick.price);
+        loop {
+            match rx.recv().await {
+                Ok(tick) => {
+                    if tick.source == PriceSource::Polymarket {
+                        debug!("[Aggregator] {} {} prob={:.4}", tick.source, tick.asset, tick.price);
+                    } else {
+                        debug!("[Aggregator] {} {} price={:.2}", tick.source, tick.asset, tick.price);
+                    }
+                    self.latest
+                        .insert((tick.source, tick.asset, tick.timeframe), tick.clone());
+                    let _ = self.tx.send(tick);
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("[Aggregator] lagging by {} messages", n);
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => return Ok(()),
             }
-            self.latest
-                .insert((tick.source, tick.asset, tick.timeframe), tick.clone());
-            let _ = self.tx.send(tick);
         }
-        Ok(())
     }
 
     /// Best real-world price for `asset`. Prefers Binance → TradingView → CryptoQuant.

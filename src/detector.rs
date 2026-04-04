@@ -220,7 +220,11 @@ impl Detector {
                 recv = rx.recv() => {
                     let tick = match recv {
                         Ok(tick) => tick,
-                        Err(_) => return Ok(()),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("[Detector] lagging by {} messages", n);
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
                     };
 
                     if self.risk.is_halted() { continue; }
@@ -638,10 +642,12 @@ impl Detector {
     }
 
     async fn simulate_paper_settlement(&self, record: &TradeRecord, current_real_price: f64, strike: f64) {
-        let elapsed = Utc::now() - record.opened_at;
-        let limit_secs = if record.timeframe.contains("5m") { 300 } else { 900 };
+        let opened_ts = record.opened_at.timestamp();
+        let bucket_secs = if record.timeframe.contains("5m") { 300 } else { 900 };
+        let expire_ts = opened_ts - (opened_ts % bucket_secs) + bucket_secs;
         
-        if elapsed.num_seconds() >= limit_secs {
+        let now_s = Utc::now().timestamp();
+        if now_s >= expire_ts + 2 { // wait until just past the official candle close boundary
             // Prefer the persisted entry reference strike for accurate up/down settlement.
             let settlement_strike = record.entry_ref_price.unwrap_or(strike);
             let won = if record.direction.eq_ignore_ascii_case("UP") {
@@ -650,7 +656,14 @@ impl Detector {
                 current_real_price < settlement_strike
             };
             
-            let pnl = if won { record.size_usdc * 0.9 } else { -record.size_usdc };
+            // PnL uses Polymarket's share model: If won, we get 1.00 USDC per share.
+            // shares = size_usdc / entry_prob
+            let shares = record.size_usdc / record.entry_prob.max(0.001);
+            let pnl = if won {
+                shares * 1.0 - record.size_usdc
+            } else {
+                -record.size_usdc
+            };
             if let Some(id) = record.id {
                 let _ = self.db.close_trade(id, pnl, if won { "WON" } else { "LOST" });
                 let slot_key = Self::record_state_key(record);
@@ -878,8 +891,8 @@ impl Detector {
 
     fn best_price(&self, asset: Asset) -> Option<f64> {
         for (src, max_age) in [
-            (PriceSource::Binance, 3i64),
-            (PriceSource::PolymarketWs, 5),
+            (PriceSource::PolymarketWs, 5i64),
+            (PriceSource::Binance, 3),
             (PriceSource::TradingView, 5),
             (PriceSource::CryptoQuant, 10),
         ] {
