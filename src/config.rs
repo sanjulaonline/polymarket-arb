@@ -43,6 +43,20 @@ pub struct Config {
     pub telegram_chat_id: Option<String>,
 
     // ── Strategy ──────────────────────────────────────────────────────────────
+    /// Signal lookback window in seconds (e.g. 30s momentum check)
+    pub price_window_seconds: u64,
+    /// Trigger threshold for Binance move over the lookback window (%).
+    pub price_change_threshold_pct: f64,
+    /// Reject signals when UP price is outside this range (already repriced).
+    pub polymarket_min_price: f64,
+    pub polymarket_max_price: f64,
+    /// Minimum positive edge in probability points (0-1 scale).
+    pub min_edge: f64,
+    /// Do not enter when this many seconds (or less) remain to expiry.
+    pub settlement_buffer_seconds: u64,
+    /// Max allowed top-of-book spread for entry token probability.
+    pub max_spread: f64,
+
     /// Min lag in percentage points to trigger a scan (3pp default)
     pub lag_threshold_pp: f64,
     /// Min edge % to actually place a trade (5% default)
@@ -153,6 +167,13 @@ impl Config {
             telegram_chat_id: env::var("TELEGRAM_CHAT_ID").ok(),
 
             // Strategy
+            price_window_seconds: parse_u64("PRICE_WINDOW_SECONDS", 30)?,
+            price_change_threshold_pct: parse_f64("PRICE_CHANGE_THRESHOLD_PCT", 0.4)?,
+            polymarket_min_price: parse_f64("POLYMARKET_MIN_PRICE", 0.35)?,
+            polymarket_max_price: parse_f64("POLYMARKET_MAX_PRICE", 0.65)?,
+            min_edge: parse_f64("MIN_EDGE", 0.10)?,
+            settlement_buffer_seconds: parse_u64("SETTLEMENT_BUFFER_SECONDS", 60)?,
+            max_spread: parse_f64("MAX_SPREAD", 0.05)?,
             lag_threshold_pp: parse_f64("LAG_THRESHOLD_PP", 3.0)?,
             min_edge_pct: parse_f64("MIN_EDGE_PCT", 5.0)?,
             max_position_pct: parse_f64("MAX_POSITION_PCT", 8.0)?,

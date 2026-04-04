@@ -125,6 +125,24 @@ PAPER_SINGLE_POSITION_PER_SLOT=true
 These reduce entry spam by enforcing a per-slot cooldown and (in paper mode)
 allowing only one open position per `(asset,timeframe)` slot.
 
+Latency-arb signal knobs (in `.env`):
+
+```env
+PRICE_WINDOW_SECONDS=30
+PRICE_CHANGE_THRESHOLD_PCT=0.4
+POLYMARKET_MIN_PRICE=0.35
+POLYMARKET_MAX_PRICE=0.65
+MIN_EDGE=0.10
+SETTLEMENT_BUFFER_SECONDS=60
+MAX_SPREAD=0.05
+```
+
+Signal flow is now:
+1. Compare Binance `price_now` vs `price_N_seconds_ago`.
+2. Trigger `UP`/`DOWN` only if move exceeds `PRICE_CHANGE_THRESHOLD_PCT`.
+3. Estimate fair UP probability with a logistic momentum map.
+4. Enter only when Polymarket is still in stale range (`POLYMARKET_MIN_PRICE..POLYMARKET_MAX_PRICE`) and positive edge (`fair - price >= MIN_EDGE`) remains after spread and settlement-buffer checks.
+
 Optional Polymarket live Chainlink reference feed knobs (in `.env`):
 
 ```env

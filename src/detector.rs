@@ -23,7 +23,7 @@ use anyhow::Result;
 use chrono::Utc;
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -43,6 +43,13 @@ use crate::{
 };
 
 const COMPARE_LOG_INTERVAL_MS: u64 = 1_000;
+
+fn estimate_fair_up_probability(pct_change: f64) -> f64 {
+    // Logistic map from short-horizon move (%) to UP probability.
+    let k = 50.0;
+    let p = 1.0 / (1.0 + (-k * (pct_change / 100.0)).exp());
+    p.clamp(0.05, 0.95)
+}
 
 #[derive(Clone, Debug)]
 struct CompareTelemetry {
@@ -118,6 +125,10 @@ struct SlotState {
     last_trade_at: Option<Instant>,
     /// Whether there is an open paper position for this slot
     paper_position_open: bool,
+    /// Rolling spot-price history used for N-second momentum checks.
+    price_history: VecDeque<(i64, f64)>,
+    /// Last time latency-arb signal evaluation ran for this slot.
+    last_signal_eval: Option<Instant>,
 }
 
 impl SlotState {
@@ -153,6 +164,8 @@ impl SlotState {
             last_no_token_refresh: None,
             last_trade_at: None,
             paper_position_open: false,
+            price_history: VecDeque::new(),
+            last_signal_eval: None,
         }
     }
 
@@ -209,10 +222,15 @@ impl Detector {
 
     pub async fn run(&self, mut rx: broadcast::Receiver<PriceTick>) -> Result<()> {
         info!(
-            "[Detector] Bayesian+Stoikov+Kelly pipeline | lag≥{:.0}pp edge≥{:.0}% conf≥{:.0}% | {}",
-            self.cfg.lag_threshold_pp, self.cfg.min_edge_pct,
-            self.cfg.min_confidence * 100.0,
-            if self.cfg.is_live() { "LIVE 🔴" } else { "PAPER 📋" }
+            "[Detector] LatencyArb pipeline | window={}s thr={:+.3}% up_range=[{:.2},{:.2}] edge>={:.3} spread<={:.3} settle_buf={}s | {}",
+            self.cfg.price_window_seconds,
+            self.cfg.price_change_threshold_pct,
+            self.cfg.polymarket_min_price,
+            self.cfg.polymarket_max_price,
+            self.cfg.min_edge,
+            self.cfg.max_spread,
+            self.cfg.settlement_buffer_seconds,
+            if self.cfg.is_live() { "LIVE" } else { "PAPER" }
         );
 
         let mut settlement_iv = tokio::time::interval(tokio::time::Duration::from_secs(10));
@@ -309,6 +327,177 @@ impl Detector {
     }
 
     async fn check_slot(&self, slot: &ContractSlot) {
+        self.check_slot_latency_arb(slot).await;
+    }
+
+    async fn check_slot_latency_arb(&self, slot: &ContractSlot) {
+        let (price_now, binance_age_ms) = match self.binance_snapshot(slot.asset) {
+            Some(v) => v,
+            None => return,
+        };
+
+        if binance_age_ms > 3_000 {
+            return;
+        }
+
+        let poly_from_agg = self.poly_snapshot(slot.asset, slot.timeframe);
+        let used_fallback = poly_from_agg.is_none();
+        self.risk.note_poly_lookup(used_fallback);
+
+        let (up_mid, _book_depth_usdc, poly_tick_age_ms, best_bid_prob, best_ask_prob) =
+            match poly_from_agg {
+                Some(v) => v,
+                None => {
+                    match self.client.get_order_book(&slot.yes_token.token_id).await {
+                        Ok(book) => match book.best_bid_ask() {
+                            Some((bid, ask)) => ((bid + ask) / 2.0, 0.0, 0, Some(bid), Some(ask)),
+                            None => return,
+                        },
+                        Err(_) => return,
+                    }
+                }
+            };
+
+        self.risk.note_poly_tick_age_ms(poly_tick_age_ms);
+
+        if !(self.cfg.polymarket_min_price <= up_mid && up_mid <= self.cfg.polymarket_max_price) {
+            return;
+        }
+
+        let key = Self::slot_state_key(slot.asset, slot.timeframe);
+        let now_ms = Utc::now().timestamp_millis();
+        let lookback_secs = self.cfg.price_window_seconds as i64;
+
+        let price_then = {
+            let mut states = self.states.lock();
+            let state = states.entry(key).or_insert_with(|| {
+                let max_shares = self.cfg.max_position_usdc() / 0.50;
+                let init_strike = if slot.strike > 0.0 { slot.strike } else { price_now };
+                SlotState::new(up_mid, init_strike, &self.cfg, max_shares, slot.time_to_expiry_secs())
+            });
+
+            if state
+                .last_signal_eval
+                .map(|t| t.elapsed() < Duration::from_secs(1))
+                .unwrap_or(false)
+            {
+                return;
+            }
+            state.last_signal_eval = Some(Instant::now());
+
+            state.price_history.push_back((now_ms, price_now));
+            let keep_ms = (lookback_secs + 5).max(10) * 1_000;
+            while let Some((ts, _)) = state.price_history.front() {
+                if now_ms - *ts > keep_ms {
+                    let _ = state.price_history.pop_front();
+                } else {
+                    break;
+                }
+            }
+            Self::price_n_seconds_ago(&state.price_history, now_ms, lookback_secs)
+        };
+
+        let price_then = match price_then {
+            Some(p) if p > 0.0 => p,
+            _ => return,
+        };
+
+        let pct_change = ((price_now - price_then) / price_then) * 100.0;
+        let direction_up = if pct_change >= self.cfg.price_change_threshold_pct {
+            true
+        } else if pct_change <= -self.cfg.price_change_threshold_pct {
+            false
+        } else {
+            return;
+        };
+
+        let yes_bid = best_bid_prob.unwrap_or(up_mid).clamp(0.0, 1.0);
+        let yes_ask = best_ask_prob.unwrap_or(up_mid).clamp(0.0, 1.0);
+        let spread = (yes_ask - yes_bid).max(0.0);
+        if spread > self.cfg.max_spread {
+            return;
+        }
+
+        let fair_up_prob = estimate_fair_up_probability(pct_change);
+        let (entry_prob, fair_prob) = if direction_up {
+            (yes_ask.clamp(0.01, 0.99), fair_up_prob)
+        } else {
+            ((1.0 - yes_bid).clamp(0.01, 0.99), (1.0 - fair_up_prob).clamp(0.01, 0.99))
+        };
+
+        let edge = fair_prob - entry_prob;
+        if edge < self.cfg.min_edge {
+            return;
+        }
+
+        let secs_left = slot.time_to_expiry_secs();
+        if secs_left < self.cfg.settlement_buffer_seconds as f64 {
+            return;
+        }
+
+        let kelly_out = kelly_size(&KellyInput {
+            posterior: fair_prob,
+            entry_price: entry_prob,
+            kelly_fraction: self.cfg.kelly_fraction,
+            portfolio_usdc: self.cfg.portfolio_size_usdc,
+            max_position_usdc: self.cfg.max_position_usdc(),
+            inventory_q: 0.0,
+            posterior_variance: 0.0,
+            effective_n: self.cfg.price_window_seconds.max(1) as f64,
+        });
+
+        if !kelly_out.has_edge || kelly_out.size_usdc <= 0.0 {
+            return;
+        }
+
+        let mut snap = MarketSnapshot::new(
+            slot.asset,
+            slot.timeframe,
+            price_now,
+            up_mid,
+            fair_up_prob,
+            1.0,
+        );
+        snap.direction_up = direction_up;
+        snap.poly_entry_prob = entry_prob;
+        snap.edge_pct = edge * 100.0;
+        snap.strategy = "SNIPER".to_string();
+        snap.models = ModelOutput {
+            bayesian_posterior: fair_prob,
+            ci_lo: fair_prob,
+            ci_hi: fair_prob,
+            posterior_variance: 0.0,
+            effective_n: self.cfg.price_window_seconds as f64,
+            bayes_ready: true,
+            reservation_price: fair_prob,
+            half_spread: spread / 2.0,
+            stoikov_bid: (entry_prob - spread / 2.0).clamp(0.0, 1.0),
+            stoikov_ask: (entry_prob + spread / 2.0).clamp(0.0, 1.0),
+            inventory_q: 0.0,
+            variance: 0.0,
+            stoikov_ready: true,
+            kelly_size_usdc: kelly_out.size_usdc,
+            full_kelly_fraction: kelly_out.full_kelly,
+            kelly_has_edge: true,
+        };
+
+        info!(
+            "[LatencyArb] {:?}/{:?} {} | BTC {:.2}->{:.2} ({:+.3}%) | pm={:.4} fair={:.4} edge={:+.4}",
+            slot.asset,
+            slot.timeframe,
+            if direction_up { "UP" } else { "DOWN" },
+            price_then,
+            price_now,
+            pct_change,
+            entry_prob,
+            fair_prob,
+            edge
+        );
+
+        self.execute(slot, &snap).await;
+    }
+
+    async fn check_slot_legacy(&self, slot: &ContractSlot) {
         // ── Step 1: get real price ─────────────────────────────────────────────
         let real_price = match self.best_price(slot.asset) { Some(p) => p, None => return };
 
@@ -1064,6 +1253,35 @@ impl Detector {
         let max = prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         if min <= 0.0 { return 0.5; }
         (max - min) / min * 100.0
+    }
+
+    fn price_n_seconds_ago(
+        history: &VecDeque<(i64, f64)>,
+        now_ms: i64,
+        lookback_secs: i64,
+    ) -> Option<f64> {
+        if history.is_empty() {
+            return None;
+        }
+
+        if lookback_secs <= 0 {
+            return history.back().map(|(_, p)| *p);
+        }
+
+        let target_ms = now_ms - lookback_secs * 1_000;
+        let mut at_or_before: Option<f64> = None;
+        let mut first_after: Option<f64> = None;
+
+        for (ts, price) in history {
+            if *ts <= target_ms {
+                at_or_before = Some(*price);
+            } else {
+                first_after = Some(*price);
+                break;
+            }
+        }
+
+        at_or_before.or(first_after)
     }
 
     fn binance_snapshot(&self, asset: Asset) -> Option<(f64, i64)> {
