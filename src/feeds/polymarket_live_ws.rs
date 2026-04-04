@@ -5,9 +5,10 @@ use chrono::{TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, info, warn};
 
+use crate::proxy::connect_ws_with_proxy;
 use crate::types::{Asset, PriceSource, PriceTick};
 
 pub struct PolymarketLiveWsFeed {
@@ -48,7 +49,7 @@ impl PolymarketLiveWsFeed {
     }
 
     async fn connect_and_stream(&self) -> Result<()> {
-        let (mut ws, _) = connect_async(self.ws_url.as_str()).await?;
+        let (mut ws, _) = connect_ws_with_proxy(self.ws_url.as_str()).await?;
         info!(
             "[PolymarketLiveWS] Connected to {} (symbol filter='{}')",
             self.ws_url,

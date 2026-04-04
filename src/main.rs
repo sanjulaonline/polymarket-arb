@@ -9,6 +9,7 @@ mod detector;
 mod feeds;
 mod kelly;
 mod polymarket;
+mod proxy;
 mod risk;
 mod stoikov;
 mod telegram;

@@ -134,6 +134,22 @@ POLYMARKET_LIVE_SYMBOL_INCLUDES=btc
 
 This feed tracks the UI-style current reference price topic (`crypto_prices_chainlink`) and is used as an additional real-price fallback source.
 
+Optional outbound proxy setup (in `.env`):
+
+```env
+# examples
+ALL_PROXY=socks5://127.0.0.1:1080
+HTTPS_PROXY=http://127.0.0.1:7890
+HTTP_PROXY=http://127.0.0.1:7890
+```
+
+Scheme precedence is:
+- `https://` and `wss://` targets: `HTTPS_PROXY` then `ALL_PROXY`
+- `http://` and `ws://` targets: `HTTP_PROXY` then `ALL_PROXY`
+- lowercase variants are also supported (`https_proxy`, `http_proxy`, `all_proxy`)
+
+`PROXY_WALLET` is unrelated to network proxying; it is only used for bankroll sizing via Polygon `USDC.e.balanceOf`.
+
 ### 3. Get Polymarket API credentials
 
 - Go to https://polymarket.com → Profile → API Keys

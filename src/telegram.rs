@@ -3,6 +3,8 @@ use reqwest::Client;
 use serde_json::json;
 use tracing::{debug, warn};
 
+use crate::proxy::apply_reqwest_proxy_from_env;
+
 pub struct Telegram {
     http: Client,
     bot_token: String,
@@ -17,8 +19,21 @@ impl Telegram {
         if requested_enabled && !enabled {
             warn!("[Telegram] No token/chat_id configured — alerts disabled");
         }
+        let http = match apply_reqwest_proxy_from_env(Client::builder()) {
+            Ok(builder) => match builder.build() {
+                Ok(client) => client,
+                Err(e) => {
+                    warn!("[Telegram] HTTP client build failed ({e}) — using direct HTTP client");
+                    Client::new()
+                }
+            },
+            Err(e) => {
+                warn!("[Telegram] Proxy config invalid ({e}) — using direct HTTP client");
+                Client::new()
+            }
+        };
         Self {
-            http: Client::new(),
+            http,
             bot_token: bot_token.unwrap_or_default(),
             chat_id: chat_id.unwrap_or_default(),
             enabled,

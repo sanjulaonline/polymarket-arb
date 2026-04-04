@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
+use crate::proxy::apply_reqwest_proxy_from_env;
 use crate::types::Timeframe;
 
 const CLOB_BASE: &str = "https://clob.polymarket.com";
@@ -239,9 +240,10 @@ pub struct PolymarketClient {
 
 impl PolymarketClient {
     pub fn new(cfg: &Config) -> Result<Self> {
-        let http = Client::builder()
-            .timeout(std::time::Duration::from_millis(cfg.exec_timeout_ms))
-            .build()?;
+        let http = apply_reqwest_proxy_from_env(
+            Client::builder().timeout(std::time::Duration::from_millis(cfg.exec_timeout_ms)),
+        )?
+        .build()?;
         Ok(Self {
             http,
             api_key: cfg.polymarket_api_key.clone(),

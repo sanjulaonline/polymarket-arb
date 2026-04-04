@@ -5,10 +5,11 @@ use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, error, info};
 use url::Url;
 
+use crate::proxy::connect_ws_with_proxy;
 use crate::types::{Asset, PriceSource, PriceTick};
 
 const CQ_WS_URL: &str = "wss://ws.cryptoquant.com/v1/stream";
@@ -60,7 +61,7 @@ impl CryptoQuantFeed {
 
     async fn connect_and_stream(&self) -> Result<()> {
         let url = Url::parse(CQ_WS_URL)?;
-        let (mut ws, _) = connect_async(url).await?;
+        let (mut ws, _) = connect_ws_with_proxy(url).await?;
         info!("[CryptoQuant] Connected");
 
         // Subscribe to BTC market data (spot price)

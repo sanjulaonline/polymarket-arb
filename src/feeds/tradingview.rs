@@ -6,7 +6,6 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio_tungstenite::{
-    connect_async,
     tungstenite::{
         client::IntoClientRequest,
         http::header::{CACHE_CONTROL, ORIGIN, PRAGMA, REFERER, USER_AGENT},
@@ -17,6 +16,7 @@ use tokio_tungstenite::{
 };
 use tracing::{debug, error, info};
 
+use crate::proxy::connect_ws_with_proxy;
 use crate::types::{Asset, PriceSource, PriceTick};
 
 const TV_WS_URLS: [&str; 3] = [
@@ -155,7 +155,7 @@ impl TradingViewFeed {
         headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
         headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
 
-        let (ws, _) = connect_async(req).await?;
+        let (ws, _) = connect_ws_with_proxy(req).await?;
         Ok(ws)
     }
 

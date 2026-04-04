@@ -6,10 +6,11 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::broadcast;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, error, info};
 use url::Url;
 
+use crate::proxy::connect_ws_with_proxy;
 use crate::types::{Asset, PriceSource, PriceTick};
 
 const BINANCE_WS: &str = "wss://stream.binance.com:9443/stream";
@@ -76,7 +77,7 @@ impl BinanceFeed {
             &[("streams", "btcusdt@trade/ethusdt@trade/btcusdt@kline_1s")],
         )?;
 
-        let (mut ws, _) = connect_async(url).await?;
+        let (mut ws, _) = connect_ws_with_proxy(url).await?;
         info!(
             "[Binance] Connected — streaming BTCUSDT/ETHUSDT trades{}",
             if self.enable_signal_1s {

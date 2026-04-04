@@ -104,6 +104,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-http-proxy"
+version = "1.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29faa5d4d308266048bd7505ba55484315a890102f9345b9ff4b87de64201592"
+dependencies = [
+ "httparse",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1257,6 +1268,7 @@ name = "polymarket-arb"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "async-http-proxy",
  "base64",
  "chrono",
  "clap",
@@ -1276,6 +1288,7 @@ dependencies = [
  "statrs",
  "tokio",
  "tokio-retry",
+ "tokio-socks",
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
@@ -1462,6 +1475,7 @@ dependencies = [
  "tokio",
  "tokio-native-tls",
  "tokio-rustls",
+ "tokio-socks",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -2024,6 +2038,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c28327cf380ac148141087fbfb9de9d7bd4e84ab5d2c28fbc911d753de8a7081"
 dependencies = [
  "rustls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-socks"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d4770b8024672c1101b3f6733eab95b18007dbe0847a8afe341fcf79e06043f"
+dependencies = [
+ "either",
+ "futures-util",
+ "thiserror",
  "tokio",
 ]
 

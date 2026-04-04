@@ -12,10 +12,12 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP + WebSocket
-reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.11", features = ["json", "rustls-tls", "socks"] }
 tokio-tungstenite = { version = "0.20", features = ["native-tls"] }
 futures-util = "0.3"
 url = "2"
+async-http-proxy = { version = "1", features = ["runtime-tokio"] }
+tokio-socks = "0.5"
 
 # Serialisation
 serde = { version = "1", features = ["derive"] }
