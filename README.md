@@ -13,6 +13,7 @@ prompt spec, rewritten in Rust for sub-100ms execution, and heavily upgraded wit
 | BTC 5m and 15m Up/Down contracts | ✅ |
 | Binance WebSocket real-time feed | ✅ `wss://stream.binance.com:9443` |
 | Binance BTC 1s UP/DOWN signal logs | ✅ `btcusdt@kline_1s` |
+| Polymarket live-data Chainlink WS reference feed | ✅ `wss://ws-live-data.polymarket.com` |
 | TradingView WebSocket feed (BTC + ETH) | ✅ |
 | CryptoQuant WebSocket feed | ✅ |
 | Top-of-book parsing uses highest bid + lowest ask | ✅ |
@@ -37,7 +38,6 @@ prompt spec, rewritten in Rust for sub-100ms execution, and heavily upgraded wit
 ---
 
 ## Architecture
-
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     Price Feeds (async)                      │
@@ -115,6 +115,15 @@ BINANCE_SIGNAL_THRESHOLD_PCT=0.01
 This logs sample-style momentum messages from closed BTC 1s candles:
 `[BinanceSignal] BTC 1s UP ...` / `[BinanceSignal] BTC 1s DOWN ...`
 
+Optional Polymarket live Chainlink reference feed knobs (in `.env`):
+
+```env
+POLYMARKET_LIVE_WS_URL=wss://ws-live-data.polymarket.com
+POLYMARKET_LIVE_SYMBOL_INCLUDES=btc
+```
+
+This feed tracks the UI-style current reference price topic (`crypto_prices_chainlink`) and is used as an additional real-price fallback source.
+
 ### 3. Get Polymarket API credentials
 
 - Go to https://polymarket.com → Profile → API Keys
@@ -157,6 +166,8 @@ When paper mode is enabled, startup bankroll source priority is:
 1. Polygon on-chain `USDC.e.balanceOf(PROXY_WALLET)` via `eth_call`
 2. Polymarket CLOB collateral balance (`/balance-allowance`)
 3. `PORTFOLIO_SIZE_USDC` fallback from `.env`
+
+Trade size must also be at least `MIN_TRADE_SIZE_USDC` (default `0.05`).
 
 The Polygon path is the Rust port of the typical ethers.js flow:
 `new Contract(USDC).balanceOf(proxyWallet)` with 6 decimals.

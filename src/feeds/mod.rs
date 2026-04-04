@@ -1,5 +1,6 @@
 pub mod binance;
 pub mod cryptoquant;
+pub mod polymarket_live_ws;
 pub mod tradingview;
 
 use anyhow::Result;
@@ -49,6 +50,7 @@ impl PriceAggregator {
     pub fn best_price(&self, asset: Asset) -> Option<f64> {
         let candidates = [
             (PriceSource::Binance, 3i64),
+            (PriceSource::PolymarketWs, 5),
             (PriceSource::TradingView, 5),
             (PriceSource::CryptoQuant, 10),
         ];

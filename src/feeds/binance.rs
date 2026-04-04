@@ -1,4 +1,4 @@
-/// Binance WebSocket feed — streams BTC and ETH prices via the public
+/// Binance WebSocket feed — streams BTC and ETH trade prices via the public
 /// combined stream endpoint: wss://stream.binance.com:9443/stream
 use anyhow::Result;
 use chrono::Utc;
@@ -12,7 +12,7 @@ use url::Url;
 
 use crate::types::{Asset, PriceSource, PriceTick};
 
-const BINANCE_WS: &str = "wss://data-stream.binance.com/stream";
+const BINANCE_WS: &str = "wss://stream.binance.com:9443/stream";
 
 #[derive(Debug, Deserialize)]
 struct StreamWrapper {
@@ -24,6 +24,12 @@ struct StreamWrapper {
 struct MiniTicker {
     #[serde(rename = "c")]
     close: String, // last price as string
+}
+
+#[derive(Debug, Deserialize)]
+struct TradeEvent {
+    #[serde(rename = "p")]
+    price: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,15 +70,15 @@ impl BinanceFeed {
     }
 
     async fn connect_and_stream(&self) -> Result<()> {
-        // Subscribe to BTC and ETH mini-ticker streams
+        // Subscribe to BTC and ETH trade streams + BTC 1s closed kline signal stream.
         let url = Url::parse_with_params(
             BINANCE_WS,
-            &[("streams", "btcusdt@miniTicker/ethusdt@miniTicker/btcusdt@kline_1s")],
+            &[("streams", "btcusdt@trade/ethusdt@trade/btcusdt@kline_1s")],
         )?;
 
         let (mut ws, _) = connect_async(url).await?;
         info!(
-            "[Binance] Connected — streaming BTCUSDT/ETHUSDT miniTicker{}",
+            "[Binance] Connected — streaming BTCUSDT/ETHUSDT trades{}",
             if self.enable_signal_1s {
                 " + BTCUSDT 1s kline signal"
             } else {
@@ -91,7 +97,12 @@ impl BinanceFeed {
                         Err(_) => continue,
                     };
 
-                    if let Some((asset, price)) = self.parse_miniticker(&envelope) {
+                    // Trade stream is primary; keep miniTicker parser as compatibility fallback.
+                    let parsed = self
+                        .parse_trade(&envelope)
+                        .or_else(|| self.parse_miniticker(&envelope));
+
+                    if let Some((asset, price)) = parsed {
                         debug!("[Binance] {:?} price={:.2}", asset, price);
                         let _ = self.tx.send(PriceTick {
                             source: PriceSource::Binance,
@@ -160,6 +171,27 @@ impl BinanceFeed {
         } else {
             return None;
         };
+        Some((asset, price))
+    }
+
+    fn parse_trade(&self, envelope: &StreamEnvelope) -> Option<(Asset, f64)> {
+        if !envelope.stream.to_lowercase().contains("@trade") {
+            return None;
+        }
+
+        let trade = TradeEvent {
+            price: serde_json::from_value::<TradeEvent>(envelope.data.clone()).ok()?.price,
+        };
+        let price: f64 = trade.price.parse().ok()?;
+        let stream = envelope.stream.to_lowercase();
+        let asset = if stream.contains("btcusdt") {
+            Asset::Btc
+        } else if stream.contains("ethusdt") {
+            Asset::Eth
+        } else {
+            return None;
+        };
+
         Some((asset, price))
     }
 

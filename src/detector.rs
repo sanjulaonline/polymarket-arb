@@ -721,6 +721,7 @@ impl Detector {
     fn best_price(&self, asset: Asset) -> Option<f64> {
         for (src, max_age) in [
             (PriceSource::Binance, 3i64),
+            (PriceSource::PolymarketWs, 5),
             (PriceSource::TradingView, 5),
             (PriceSource::CryptoQuant, 10),
         ] {
@@ -757,7 +758,12 @@ impl Detector {
     }
 
     fn source_count(&self, asset: Asset) -> usize {
-        [PriceSource::Binance, PriceSource::TradingView, PriceSource::CryptoQuant]
+        [
+            PriceSource::Binance,
+            PriceSource::PolymarketWs,
+            PriceSource::TradingView,
+            PriceSource::CryptoQuant,
+        ]
             .iter()
             .filter(|&&src| {
                 self.latest.get(&(src, asset, None))
@@ -768,14 +774,23 @@ impl Detector {
     }
 
     fn source_spread_pct(&self, asset: Asset) -> f64 {
-        let prices: Vec<f64> = [PriceSource::Binance, PriceSource::TradingView, PriceSource::CryptoQuant]
-            .iter()
-            .filter_map(|&src| {
-                self.latest.get(&(src, asset, None)).and_then(|t| {
-                    if (Utc::now() - t.timestamp).num_seconds() <= 10 { Some(t.price) } else { None }
-                })
+        let prices: Vec<f64> = [
+            PriceSource::Binance,
+            PriceSource::PolymarketWs,
+            PriceSource::TradingView,
+            PriceSource::CryptoQuant,
+        ]
+        .iter()
+        .filter_map(|&src| {
+            self.latest.get(&(src, asset, None)).and_then(|t| {
+                if (Utc::now() - t.timestamp).num_seconds() <= 10 {
+                    Some(t.price)
+                } else {
+                    None
+                }
             })
-            .collect();
+        })
+        .collect();
         if prices.len() < 2 { return 0.5; }
         let min = prices.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);

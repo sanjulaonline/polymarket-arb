@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
 
@@ -84,7 +84,12 @@ impl RiskManager {
             .min(self.cfg.max_order_size_usdc)
             .min(remaining_capacity);
 
-        if size < 1.0 {
+        if size < self.cfg.min_trade_size_usdc {
+            debug!(
+                "[Risk] size {:.4} below MIN_TRADE_SIZE_USDC={:.4} — skip",
+                size,
+                self.cfg.min_trade_size_usdc
+            );
             return None;
         }
 

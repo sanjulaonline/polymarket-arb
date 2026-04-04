@@ -30,6 +30,7 @@ use detector::{ContractSlot, Detector};
 use feeds::{
     binance::BinanceFeed,
     cryptoquant::CryptoQuantFeed,
+    polymarket_live_ws::PolymarketLiveWsFeed,
     tradingview::TradingViewFeed,
     PriceAggregator,
 };
@@ -108,6 +109,7 @@ async fn stats_printer(
         );
 
         let btc_binance = fmt_tick(&latest, PriceSource::Binance, Asset::Btc, None);
+        let btc_poly_ws = fmt_tick(&latest, PriceSource::PolymarketWs, Asset::Btc, None);
         let btc_tv = fmt_tick(&latest, PriceSource::TradingView, Asset::Btc, None);
         let btc_cq = fmt_tick(&latest, PriceSource::CryptoQuant, Asset::Btc, None);
         let eth_binance = fmt_tick(&latest, PriceSource::Binance, Asset::Eth, None);
@@ -126,8 +128,9 @@ async fn stats_printer(
             .join(" | ");
 
         info!(
-            "[Tape] BTC(binance={}, tv={}, cq={}) | ETH(binance={}, tv={}) | POLY({})",
+            "[Tape] BTC(binance={}, poly_ws={}, tv={}, cq={}) | ETH(binance={}, tv={}) | POLY({})",
             btc_binance,
+            btc_poly_ws,
             btc_tv,
             btc_cq,
             eth_binance,
@@ -502,6 +505,21 @@ async fn main() -> Result<()> {
             let feed = BinanceFeed::new(tx, enable_signal_1s, signal_threshold_pct);
             if let Err(e) = feed.run().await { error!("[Binance] fatal: {e}"); }
         }));
+    }
+
+    // Polymarket live-data WS Chainlink reference feed (BTC/ETH)
+    if !cfg.polymarket_live_ws_url.trim().is_empty() {
+        let tx = raw_tx.clone();
+        let ws_url = cfg.polymarket_live_ws_url.clone();
+        let symbol_includes = cfg.polymarket_live_symbol_includes.clone();
+        handles.push(tokio::spawn(async move {
+            let feed = PolymarketLiveWsFeed::new(&ws_url, &symbol_includes, tx);
+            if let Err(e) = feed.run().await {
+                error!("[PolymarketLiveWS] fatal: {e}");
+            }
+        }));
+    } else {
+        info!("[PolymarketLiveWS] Disabled (POLYMARKET_LIVE_WS_URL is empty)");
     }
 
     // TradingView BTC

@@ -21,6 +21,10 @@ pub struct Config {
     pub cryptoquant_api_key: String,
     pub tradingview_symbol_btc: String,
     pub tradingview_symbol_eth: String,
+    /// Polymarket live-data websocket URL for Chainlink reference prices
+    pub polymarket_live_ws_url: String,
+    /// Symbol filter used on Polymarket live-data topic (e.g. "btc")
+    pub polymarket_live_symbol_includes: String,
     /// Enabled BTC contract timeframes (e.g. [5m], [15m], or [5m,15m])
     pub market_timeframes: Vec<Timeframe>,
 
@@ -57,6 +61,8 @@ pub struct Config {
     pub risk_pct_per_trade: f64,
     /// Hard max order size in USDC
     pub max_order_size_usdc: f64,
+    /// Minimum approved trade size in USDC
+    pub min_trade_size_usdc: f64,
     /// Portfolio size in USDC (for risk calculations)
     pub portfolio_size_usdc: f64,
     /// Execution timeout in ms
@@ -122,6 +128,10 @@ impl Config {
                 .unwrap_or_else(|_| "BINANCE:BTCUSDT".into()),
             tradingview_symbol_eth: env::var("TV_SYMBOL_ETH")
                 .unwrap_or_else(|_| "BINANCE:ETHUSDT".into()),
+            polymarket_live_ws_url: env::var("POLYMARKET_LIVE_WS_URL")
+                .unwrap_or_else(|_| "wss://ws-live-data.polymarket.com".into()),
+            polymarket_live_symbol_includes: env::var("POLYMARKET_LIVE_SYMBOL_INCLUDES")
+                .unwrap_or_else(|_| "btc".into()),
             market_timeframes: parse_timeframes(
                 "MARKET_TIMEFRAMES",
                 &[Timeframe::FiveMin, Timeframe::FifteenMin],
@@ -148,6 +158,7 @@ impl Config {
             daily_drawdown_kill_pct: parse_f64("DAILY_DRAWDOWN_KILL_PCT", 20.0)?,
             risk_pct_per_trade: parse_f64("RISK_PCT_PER_TRADE", 0.5)?,
             max_order_size_usdc: parse_f64("MAX_ORDER_SIZE_USDC", 500.0)?,
+            min_trade_size_usdc: parse_f64("MIN_TRADE_SIZE_USDC", 0.05)?,
             portfolio_size_usdc: parse_f64("PORTFOLIO_SIZE_USDC", 10_000.0)?,
             exec_timeout_ms: parse_u64("EXEC_TIMEOUT_MS", 5000)?,
             poly_poll_ms: parse_u64("POLY_POLL_MS", 50)?,

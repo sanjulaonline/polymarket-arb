@@ -43,6 +43,7 @@ pub enum PriceSource {
     TradingView,
     CryptoQuant,
     Polymarket,
+    PolymarketWs,
 }
 
 impl std::fmt::Display for PriceSource {
@@ -52,6 +53,7 @@ impl std::fmt::Display for PriceSource {
             PriceSource::TradingView => write!(f, "TradingView"),
             PriceSource::CryptoQuant => write!(f, "CryptoQuant"),
             PriceSource::Polymarket => write!(f, "Polymarket"),
+            PriceSource::PolymarketWs => write!(f, "PolymarketWS"),
         }
     }
 }
