@@ -178,6 +178,11 @@ fn short_token(token_id: &str) -> String {
     format!("{}...{}", &token_id[..6], &token_id[token_id.len() - 6..])
 }
 
+fn fmt_prob(v: Option<f64>) -> String {
+    v.map(|p| format!("{:.4}", p))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
 fn top_book_depth_usdc(book: &polymarket::client::OrderBook) -> f64 {
     let mut bids = book.bids.clone();
     bids.sort_by(|a, b| b.price.total_cmp(&a.price));
@@ -406,6 +411,13 @@ async fn main() -> Result<()> {
             .with_context(|| format!("Failed to fetch BTC {} market", timeframe))?;
         info!("[Init] BTC {}: \"{}\"", timeframe, market.question);
 
+        if let Some(event_url) = market.event_url.as_deref() {
+            info!("[Init] Market URL | tf={} {}", timeframe, event_url);
+        }
+        if let Some(market_id) = market.market_id.as_deref() {
+            info!("[Init] Market ID | tf={} {}", timeframe, market_id);
+        }
+
         let slug = market
             .market_slug
             .as_deref()
@@ -447,6 +459,17 @@ async fn main() -> Result<()> {
 
         log_book_snapshot(&poly_client, &format!("BTC {} YES", timeframe), &yes_token.token_id).await;
         log_book_snapshot(&poly_client, &format!("BTC {} NO", timeframe), &no_token.token_id).await;
+
+        let yes_prices = poly_client.get_token_side_prices(&yes_token.token_id).await;
+        let no_prices = poly_client.get_token_side_prices(&no_token.token_id).await;
+        info!(
+            "[Init] BTC {} /price | YES(buy={} sell={}) NO(buy={} sell={})",
+            timeframe,
+            fmt_prob(yes_prices.best_buy),
+            fmt_prob(yes_prices.best_sell),
+            fmt_prob(no_prices.best_buy),
+            fmt_prob(no_prices.best_sell),
+        );
 
         contracts.push(ContractSlot {
             asset: Asset::Btc,

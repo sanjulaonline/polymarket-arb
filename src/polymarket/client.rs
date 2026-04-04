@@ -36,7 +36,11 @@ pub struct Market {
     pub question: String,
     pub tokens: Vec<Token>,
     #[serde(default)]
+    pub market_id: Option<String>,
+    #[serde(default)]
     pub market_slug: Option<String>,
+    #[serde(default)]
+    pub event_url: Option<String>,
     #[serde(default)]
     pub end_date_iso: Option<String>,
     #[serde(default)]
@@ -62,11 +66,36 @@ struct GammaEvent {
 
 #[derive(Debug, Deserialize)]
 struct GammaMarket {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(rename = "conditionId", default)]
+    condition_id: Option<String>,
+    #[serde(default)]
+    slug: Option<String>,
     #[serde(rename = "clobTokenIds")]
-    clob_token_ids: Option<String>,
-    outcomes: Option<String>,
+    clob_token_ids: Option<Value>,
+    #[serde(default)]
+    outcomes: Option<Value>,
     #[serde(rename = "endDate")]
     end_date: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpDownMarketIds {
+    pub event_slug: String,
+    pub event_url: String,
+    pub title: String,
+    pub market_id: Option<String>,
+    pub condition_id: Option<String>,
+    pub end_date_iso: Option<String>,
+    pub up_token_id: String,
+    pub down_token_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TokenSidePrices {
+    pub best_buy: Option<f64>,
+    pub best_sell: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -303,6 +332,56 @@ impl PolymarketClient {
     }
 
     async fn get_updown_market_from_gamma(&self, asset_slug: &str, tf: Timeframe) -> Result<Market> {
+        let ids = self.get_updown_market_ids_by_slug(asset_slug, tf).await?;
+        let kline_interval = match tf {
+            Timeframe::FiveMin => "5m",
+            Timeframe::FifteenMin => "15m",
+        };
+
+        info!(
+            "[Client] Found {} {} market via gamma slug {} | yes_token={} | no_token={} | end_date={}",
+            asset_slug.to_uppercase(),
+            kline_interval,
+            ids.event_slug,
+            ids.up_token_id,
+            ids.down_token_id,
+            ids.end_date_iso.as_deref().unwrap_or("unknown")
+        );
+        info!("[Client] Market title: {}", ids.title);
+
+        let condition_id = ids
+            .condition_id
+            .clone()
+            .or_else(|| ids.market_id.clone())
+            .unwrap_or_else(|| ids.event_slug.clone());
+
+        Ok(Market {
+            condition_id,
+            question: ids.title,
+            tokens: vec![
+                Token {
+                    token_id: ids.up_token_id,
+                    outcome: "Yes".to_string(),
+                },
+                Token {
+                    token_id: ids.down_token_id,
+                    outcome: "No".to_string(),
+                },
+            ],
+            market_id: ids.market_id,
+            market_slug: Some(format!("{}-updown-{}", asset_slug, kline_interval)),
+            event_url: Some(ids.event_url),
+            end_date_iso: ids.end_date_iso,
+            active: true,
+            closed: false,
+        })
+    }
+
+    pub async fn get_updown_market_ids_by_slug(
+        &self,
+        asset_slug: &str,
+        tf: Timeframe,
+    ) -> Result<UpDownMarketIds> {
         let (bucket_size_min, interval_secs, kline_interval) = match tf {
             Timeframe::FiveMin => (5u32, 300i64, "5m"),
             Timeframe::FifteenMin => (15u32, 900i64, "15m"),
@@ -316,7 +395,6 @@ impl PolymarketClient {
             .and_then(|dt| dt.with_nanosecond(0))
             .ok_or_else(|| anyhow!("failed to compute current candle bucket"))?;
 
-        // Check current and next bucket to avoid edge timing misses.
         let timestamps = [
             current_bucket_start.timestamp(),
             current_bucket_start.timestamp() + interval_secs,
@@ -324,34 +402,19 @@ impl PolymarketClient {
 
         for ts in timestamps {
             let slug = format!("{}-updown-{}-{}", asset_slug, kline_interval, ts);
-            let url = format!("https://gamma-api.polymarket.com/events?slug={}", slug);
+            let event = match self.fetch_gamma_event_for_slug(&slug).await {
+                Ok(e) => e,
+                Err(e) => {
+                    debug!("[Client] gamma slug {} lookup failed: {}", slug, e);
+                    continue;
+                }
+            };
 
-            let resp = self
-                .http
-                .get(&url)
-                .send()
-                .await
-                .with_context(|| format!("GET gamma events for slug {slug}"))?;
-
-            if !resp.status().is_success() {
-                debug!("[Client] gamma slug {} returned HTTP {}", slug, resp.status());
-                continue;
-            }
-
-            let events: Vec<GammaEvent> = resp
-                .json()
-                .await
-                .with_context(|| format!("parse gamma events for slug {slug}"))?;
-
-            let Some(event) = events.first() else {
+            let Some(market) = event.markets.first() else {
                 continue;
             };
 
-            let Some(m) = event.markets.first() else {
-                continue;
-            };
-
-            let expiration = m
+            let expiration = market
                 .end_date
                 .as_deref()
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
@@ -362,69 +425,23 @@ impl PolymarketClient {
                 continue;
             }
 
-            let token_ids_raw = match &m.clob_token_ids {
-                Some(v) => v,
-                None => continue,
-            };
-            let outcomes_raw = match &m.outcomes {
-                Some(v) => v,
-                None => continue,
+            let (up_token_id, down_token_id) = Self::extract_up_down_tokens(market, &slug)?;
+            let title = if event.title.is_empty() {
+                slug.clone()
+            } else {
+                event.title.clone()
             };
 
-            let token_ids: Vec<String> = serde_json::from_str(token_ids_raw)
-                .with_context(|| format!("parse clobTokenIds for slug {slug}"))?;
-            let outcomes: Vec<String> = serde_json::from_str(outcomes_raw)
-                .with_context(|| format!("parse outcomes for slug {slug}"))?;
-
-            let mut yes_token = None;
-            let mut no_token = None;
-
-            for (idx, outcome) in outcomes.iter().enumerate() {
-                let Some(token_id) = token_ids.get(idx) else {
-                    continue;
-                };
-                if outcome.eq_ignore_ascii_case("UP") || outcome.eq_ignore_ascii_case("YES") {
-                    yes_token = Some(token_id.clone());
-                } else if outcome.eq_ignore_ascii_case("DOWN") || outcome.eq_ignore_ascii_case("NO") {
-                    no_token = Some(token_id.clone());
-                }
-            }
-
-            if let (Some(yes), Some(no)) = (yes_token, no_token) {
-                info!(
-                    "[Client] Found {} {} market via gamma slug {} | yes_token={} | no_token={} | end_date={}",
-                    asset_slug.to_uppercase(),
-                    kline_interval,
-                    slug,
-                    yes,
-                    no,
-                    m.end_date.as_deref().unwrap_or("unknown")
-                );
-
-                info!(
-                    "[Client] Market title: {}",
-                    if event.title.is_empty() { slug.clone() } else { event.title.clone() }
-                );
-
-                return Ok(Market {
-                    condition_id: slug.clone(),
-                    question: if event.title.is_empty() { slug } else { event.title.clone() },
-                    market_slug: Some(format!("{}-updown-{}", asset_slug, kline_interval)),
-                    end_date_iso: m.end_date.clone(),
-                    tokens: vec![
-                        Token {
-                            token_id: yes,
-                            outcome: "Yes".to_string(),
-                        },
-                        Token {
-                            token_id: no,
-                            outcome: "No".to_string(),
-                        },
-                    ],
-                    active: true,
-                    closed: false,
-                });
-            }
+            return Ok(UpDownMarketIds {
+                event_slug: slug.clone(),
+                event_url: format!("https://polymarket.com/event/{}", slug),
+                title,
+                market_id: market.id.clone(),
+                condition_id: market.condition_id.clone(),
+                end_date_iso: market.end_date.clone(),
+                up_token_id,
+                down_token_id,
+            });
         }
 
         Err(anyhow!(
@@ -432,6 +449,152 @@ impl PolymarketClient {
             asset_slug,
             tf
         ))
+    }
+
+    async fn fetch_gamma_event_for_slug(&self, slug: &str) -> Result<GammaEvent> {
+        let canonical_url = format!("https://gamma-api.polymarket.com/events/slug/{}", slug);
+        let canonical_resp = self
+            .http
+            .get(&canonical_url)
+            .send()
+            .await
+            .with_context(|| format!("GET gamma event by slug {slug}"))?;
+
+        if canonical_resp.status().is_success() {
+            return canonical_resp
+                .json::<GammaEvent>()
+                .await
+                .with_context(|| format!("parse gamma event by slug {slug}"));
+        }
+
+        debug!(
+            "[Client] /events/slug/{} returned HTTP {}; trying /events?slug= fallback",
+            slug,
+            canonical_resp.status()
+        );
+
+        let fallback_url = format!("https://gamma-api.polymarket.com/events?slug={}", slug);
+        let fallback_resp = self
+            .http
+            .get(&fallback_url)
+            .send()
+            .await
+            .with_context(|| format!("GET gamma events fallback for slug {slug}"))?;
+
+        if !fallback_resp.status().is_success() {
+            return Err(anyhow!(
+                "gamma slug {} not available (HTTP {})",
+                slug,
+                fallback_resp.status()
+            ));
+        }
+
+        let events = fallback_resp
+            .json::<Vec<GammaEvent>>()
+            .await
+            .with_context(|| format!("parse gamma events fallback for slug {slug}"))?;
+
+        events
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("gamma events fallback returned no events for slug {}", slug))
+    }
+
+    fn extract_up_down_tokens(market: &GammaMarket, slug: &str) -> Result<(String, String)> {
+        let token_ids = market
+            .clob_token_ids
+            .as_ref()
+            .and_then(Self::json_value_to_vec)
+            .ok_or_else(|| anyhow!("missing clobTokenIds for slug {}", slug))?;
+        let outcomes = market
+            .outcomes
+            .as_ref()
+            .and_then(Self::json_value_to_vec)
+            .ok_or_else(|| anyhow!("missing outcomes for slug {}", slug))?;
+
+        let mut up_token = None;
+        let mut down_token = None;
+
+        for (idx, outcome) in outcomes.iter().enumerate() {
+            let Some(token_id) = token_ids.get(idx) else {
+                continue;
+            };
+            if outcome.eq_ignore_ascii_case("UP") || outcome.eq_ignore_ascii_case("YES") {
+                up_token = Some(token_id.clone());
+            } else if outcome.eq_ignore_ascii_case("DOWN") || outcome.eq_ignore_ascii_case("NO") {
+                down_token = Some(token_id.clone());
+            }
+        }
+
+        match (up_token, down_token) {
+            (Some(up), Some(down)) => Ok((up, down)),
+            _ => Err(anyhow!("could not map up/down token ids for slug {}", slug)),
+        }
+    }
+
+    fn json_value_to_vec(v: &Value) -> Option<Vec<String>> {
+        match v {
+            Value::String(s) => serde_json::from_str::<Vec<String>>(s).ok(),
+            Value::Array(arr) => {
+                let out = arr
+                    .iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>();
+                if out.is_empty() {
+                    None
+                } else {
+                    Some(out)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub async fn get_token_best_price(&self, token_id: &str, side: OrderSide) -> Result<f64> {
+        let side_str = match side {
+            OrderSide::Buy => "BUY",
+            OrderSide::Sell => "SELL",
+        };
+
+        let path = "/price";
+        let url = format!("{}{}", CLOB_BASE, path);
+        let resp = self
+            .http
+            .get(&url)
+            .query(&[("token_id", token_id), ("side", side_str)])
+            .send()
+            .await
+            .with_context(|| format!("GET /price for token {} side {}", token_id, side_str))?;
+
+        let status = resp.status();
+        let body = resp.text().await.context("read /price body")?;
+        if !status.is_success() {
+            return Err(anyhow!(
+                "/price failed with HTTP {} for token {} side {}: {}",
+                status,
+                token_id,
+                side_str,
+                &body[..body.len().min(200)]
+            ));
+        }
+
+        let payload: Value = serde_json::from_str(&body).context("parse /price JSON")?;
+        let price = payload
+            .get("price")
+            .and_then(|p| match p {
+                Value::String(s) => s.trim().parse::<f64>().ok(),
+                Value::Number(n) => n.as_f64(),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow!("missing price field in /price response"))?;
+
+        Ok(price)
+    }
+
+    pub async fn get_token_side_prices(&self, token_id: &str) -> TokenSidePrices {
+        let best_buy = self.get_token_best_price(token_id, OrderSide::Buy).await.ok();
+        let best_sell = self.get_token_best_price(token_id, OrderSide::Sell).await.ok();
+        TokenSidePrices { best_buy, best_sell }
     }
 
     // ── API calls ─────────────────────────────────────────────────────────────

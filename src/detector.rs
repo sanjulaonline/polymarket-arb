@@ -25,7 +25,7 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
@@ -41,6 +41,26 @@ use crate::{
     telegram::Telegram,
     types::{Asset, MarketSnapshot, ModelOutput, PriceSource, PriceTick, Timeframe, TradeRecord},
 };
+
+const COMPARE_LOG_INTERVAL_MS: u64 = 1_000;
+
+#[derive(Clone, Debug)]
+struct CompareTelemetry {
+    binance_price: f64,
+    binance_age_ms: i64,
+    strike: f64,
+    yes_bid: f64,
+    yes_ask: f64,
+    yes_mid: f64,
+    cex_prob: f64,
+    bayes_posterior: f64,
+    lag_pp: f64,
+    bayes_edge_pp: f64,
+    direction_up: bool,
+    prefilter_pass: bool,
+    no_token_id: String,
+    allow_no_token_refresh: bool,
+}
 
 // ── Contract slot ──────────────────────────────────────────────────────────────
 
@@ -85,6 +105,12 @@ struct SlotState {
     candle_open_price: Option<f64>,
     /// UTC epoch timestamp of current bucket start
     candle_bucket_start_ts: Option<i64>,
+    /// Last time a live compare line was emitted for this slot
+    last_compare_log: Option<Instant>,
+    /// Cached active NO token id for compare telemetry
+    active_no_token_id: Option<String>,
+    /// Last attempt time to refresh NO token mapping for this slot
+    last_no_token_refresh: Option<Instant>,
 }
 
 impl SlotState {
@@ -115,6 +141,9 @@ impl SlotState {
             last_eval: None,
             candle_open_price: None,
             candle_bucket_start_ts: None,
+            last_compare_log: None,
+            active_no_token_id: None,
+            last_no_token_refresh: None,
         }
     }
 
@@ -287,7 +316,7 @@ impl Detector {
         let timeframe_mins = match slot.timeframe { Timeframe::FiveMin => 5, Timeframe::FifteenMin => 15 };
 
         // All model state updates happen inside this lock scope
-        let (snap_opt, model_out) = {
+        let (snap_opt, model_out, compare_log) = {
             let mut states = self.states.lock();
             let state = states.entry(key).or_insert_with(|| {
                 let max_shares = self.cfg.max_position_usdc() / 0.50;
@@ -344,13 +373,53 @@ impl Detector {
             // ── Step 5: fast pre-filter ────────────────────────────────────────
             let lag_pp = (cex_prob - poly_prob).abs() * 100.0;
             let bayes_edge_pp = (posterior - poly_prob).abs() * 100.0;
+            let prefilter_pp = self.cfg.lag_threshold_pp.max(self.cfg.min_edge_pct);
+            let prefilter_pass = lag_pp >= prefilter_pp || bayes_edge_pp >= prefilter_pp;
+
+            let compare_due = slot.asset == Asset::Btc
+                && state
+                    .last_compare_log
+                    .map(|t| t.elapsed() >= Duration::from_millis(COMPARE_LOG_INTERVAL_MS))
+                    .unwrap_or(true);
+
+            let compare_log = if compare_due {
+                state.last_compare_log = Some(Instant::now());
+                let no_token_id = state
+                    .active_no_token_id
+                    .clone()
+                    .unwrap_or_else(|| slot.no_token.token_id.clone());
+                let allow_no_token_refresh = state
+                    .last_no_token_refresh
+                    .map(|t| t.elapsed() >= Duration::from_secs(20))
+                    .unwrap_or(true);
+                let (binance_price, binance_age_ms) = self
+                    .binance_snapshot(slot.asset)
+                    .unwrap_or((real_price, -1));
+                Some(CompareTelemetry {
+                    binance_price,
+                    binance_age_ms,
+                    strike: effective_strike,
+                    yes_bid: best_bid_prob.unwrap_or(poly_prob),
+                    yes_ask: best_ask_prob.unwrap_or(poly_prob),
+                    yes_mid: poly_prob,
+                    cex_prob,
+                    bayes_posterior: posterior,
+                    lag_pp,
+                    bayes_edge_pp,
+                    direction_up,
+                    prefilter_pass,
+                    no_token_id,
+                    allow_no_token_refresh,
+                })
+            } else {
+                None
+            };
 
             // Must exceed lag threshold from either raw CEX or Bayesian
-            let prefilter_pp = self.cfg.lag_threshold_pp.max(self.cfg.min_edge_pct);
-            if lag_pp < prefilter_pp && bayes_edge_pp < prefilter_pp {
+            if !prefilter_pass {
                 debug!("[Detector] {:?}/{:?} lag={:.1}pp bayes_edge={:.1}pp prefilter={:.1}pp — skip",
                     slot.asset, slot.timeframe, lag_pp, bayes_edge_pp, prefilter_pp);
-                (None, ModelOutput::default())
+                (None, ModelOutput::default(), compare_log)
             } else {
                 // ── Step 6: confidence score ───────────────────────────────────
                 let streak = state.update_streak(direction_up);
@@ -415,9 +484,82 @@ impl Detector {
                 snap.direction_up = direction_up;
                 snap.poly_entry_prob = entry_price.clamp(0.01, 0.99);
 
-                (Some(snap), model_out)
+                (Some(snap), model_out, compare_log)
             }
         };
+
+        if let Some(c) = compare_log {
+            let mut no_live = self
+                .client
+                .get_order_book(&c.no_token_id)
+                .await
+                .ok()
+                .and_then(|book| book.best_bid_ask().map(|(b, a)| (b, a, (b + a) / 2.0)));
+
+            let mut refreshed_no_token_id: Option<String> = None;
+
+            // Up/down token IDs rotate frequently; refresh NO token by timeframe when needed.
+            if no_live.is_none() && c.allow_no_token_refresh && slot.asset == Asset::Btc {
+                if let Ok(market) = self.client.get_btc_market_for_timeframe(slot.timeframe).await {
+                    if let Some(no_token) = market
+                        .tokens
+                        .iter()
+                        .find(|t| t.outcome.eq_ignore_ascii_case("no"))
+                        .or_else(|| market.tokens.iter().find(|t| t.outcome.eq_ignore_ascii_case("down")))
+                    {
+                        refreshed_no_token_id = Some(no_token.token_id.clone());
+                        no_live = self
+                            .client
+                            .get_order_book(&no_token.token_id)
+                            .await
+                            .ok()
+                            .and_then(|book| book.best_bid_ask().map(|(b, a)| (b, a, (b + a) / 2.0)));
+                    }
+                }
+            }
+
+            if c.allow_no_token_refresh || refreshed_no_token_id.is_some() {
+                let key = (format!("{:?}", slot.asset), format!("{:?}", slot.timeframe));
+                let mut states = self.states.lock();
+                if let Some(state) = states.get_mut(&key) {
+                    state.last_no_token_refresh = Some(Instant::now());
+                    if let Some(tok) = refreshed_no_token_id {
+                        state.active_no_token_id = Some(tok);
+                    }
+                }
+            }
+
+            let (no_bid_s, no_ask_s, no_mid_s) = if let Some((b, a, m)) = no_live {
+                (
+                    format!("{:.4}", b),
+                    format!("{:.4}", a),
+                    format!("{:.4}", m),
+                )
+            } else {
+                ("n/a".to_string(), "n/a".to_string(), "n/a".to_string())
+            };
+
+            info!(
+                "[Compare] {:?}/{:?} | binance={:.2} age={}ms strike={:.2} | YES(bid={:.4} ask={:.4} mid={:.4}) NO(bid={} ask={} mid={}) | cex_prob={:.4} bayes={:.4} lag={:.2}pp bayes_edge={:.2}pp dir={} prefilter={}",
+                slot.asset,
+                slot.timeframe,
+                c.binance_price,
+                c.binance_age_ms,
+                c.strike,
+                c.yes_bid,
+                c.yes_ask,
+                c.yes_mid,
+                no_bid_s,
+                no_ask_s,
+                no_mid_s,
+                c.cex_prob,
+                c.bayes_posterior,
+                c.lag_pp,
+                c.bayes_edge_pp,
+                if c.direction_up { "UP" } else { "DOWN" },
+                if c.prefilter_pass { "pass" } else { "fail" },
+            );
+        }
 
         // ── Step 7: edge + confidence gate ────────────────────────────────────
         if let Some(snap) = snap_opt {
@@ -639,6 +781,15 @@ impl Detector {
         let max = prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         if min <= 0.0 { return 0.5; }
         (max - min) / min * 100.0
+    }
+
+    fn binance_snapshot(&self, asset: Asset) -> Option<(f64, i64)> {
+        self.latest
+            .get(&(PriceSource::Binance, asset, None))
+            .map(|t| {
+                let age_ms = (Utc::now() - t.timestamp).num_milliseconds().max(0);
+                (t.price, age_ms)
+            })
     }
 
     fn adaptive_cex_vol(state: &SlotState, timeframe_mins: u32) -> Option<f64> {
