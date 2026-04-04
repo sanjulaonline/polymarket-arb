@@ -28,11 +28,12 @@ pub struct Dashboard {
     db: Arc<Database>,
     risk: Arc<RiskManager>,
     cfg: Config,
+    market_titles: Vec<String>,
 }
 
 impl Dashboard {
-    pub fn new(db: Arc<Database>, risk: Arc<RiskManager>, cfg: Config) -> Self {
-        Self { db, risk, cfg }
+    pub fn new(db: Arc<Database>, risk: Arc<RiskManager>, cfg: Config, market_titles: Vec<String>) -> Self {
+        Self { db, risk, cfg, market_titles }
     }
 
     pub async fn run(&self, shutdown: watch::Receiver<bool>) -> Result<()> {
@@ -96,9 +97,10 @@ impl Dashboard {
         let mode_color = if self.cfg.is_live() { Color::Red } else { Color::Yellow };
         let mode_label = if self.cfg.is_live() { "🔴 LIVE" } else { "📋 PAPER" };
         let header = Paragraph::new(format!(
-            " Polymarket Arb Bot  |  {}  |  {}",
+            " Polymarket Arb Bot  |  {}  |  {}\n {}",
             mode_label,
-            Utc::now().format("%H:%M:%S UTC")
+            Utc::now().format("%H:%M:%S UTC"),
+            self.market_titles.join("  |  ")
         ))
         .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
         .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(mode_color)));

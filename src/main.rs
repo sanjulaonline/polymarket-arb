@@ -241,21 +241,33 @@ async fn log_book_snapshot(client: &Arc<PolymarketClient>, label: &str, token_id
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv::dotenv().ok();
+    
+    let mut cfg = Config::from_env().context("Config error")?;
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .compact()
-        .init();
+    if cfg.enable_tui {
+        let file = std::fs::File::create("bot.log").expect("could not create log file");
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .with_writer(std::sync::Arc::new(file))
+            .compact()
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .compact()
+            .init();
+    }
 
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     info!("  Polymarket Latency Arb Bot  v2.0              ");
     info!("  BTC | Up/Down configurable TF | Kelly | Paper-first ");
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
-    let mut cfg = Config::from_env().context("Config error")?;
 
     // Safety check
     if cfg.is_live() {
@@ -478,6 +490,7 @@ async fn main() -> Result<()> {
         contracts.push(ContractSlot {
             asset: Asset::Btc,
             timeframe: *timeframe,
+            title: market.question.clone(),
             yes_token,
             no_token,
             strike: 0.0,
@@ -623,8 +636,9 @@ async fn main() -> Result<()> {
         .await;
 
     if cfg.enable_tui {
+        let market_titles: Vec<String> = contracts.iter().map(|c| format!("BTC {}: {}", c.timeframe, c.title)).collect();
         info!("[Runtime] TUI dashboard enabled. Press q/Esc to stop.");
-        let dash = Dashboard::new(db.clone(), risk.clone(), cfg.clone());
+        let dash = Dashboard::new(db.clone(), risk.clone(), cfg.clone(), market_titles);
         if let Err(e) = dash.run(shutdown_rx).await {
             warn!("[Dashboard] failed: {}. Falling back to console mode.", e);
             info!("[Runtime] Console-only mode active. Press Ctrl+C to stop.");

@@ -68,6 +68,7 @@ struct CompareTelemetry {
 pub struct ContractSlot {
     pub asset: Asset,
     pub timeframe: Timeframe,
+    pub title: String,
     pub yes_token: Token,
     pub no_token: Token,
     /// Dollar strike price of the contract
