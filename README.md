@@ -12,6 +12,7 @@ prompt spec, rewritten in Rust for sub-100ms execution, and heavily upgraded wit
 |---|---|
 | BTC 5m and 15m Up/Down contracts | ✅ |
 | Binance WebSocket real-time feed | ✅ `wss://stream.binance.com:9443` |
+| Binance BTC 1s UP/DOWN signal logs | ✅ `btcusdt@kline_1s` |
 | TradingView WebSocket feed (BTC + ETH) | ✅ |
 | CryptoQuant WebSocket feed | ✅ |
 | Top-of-book parsing uses highest bid + lowest ask | ✅ |
@@ -103,6 +104,16 @@ MARKET_TIMEFRAMES=5m      # only 5-minute contracts
 MARKET_TIMEFRAMES=15m     # only 15-minute contracts
 MARKET_TIMEFRAMES=5m,15m  # both (default)
 ```
+
+Optional fast Binance signal knobs (in `.env`):
+
+```env
+ENABLE_BINANCE_SIGNAL_1S=true
+BINANCE_SIGNAL_THRESHOLD_PCT=0.01
+```
+
+This logs sample-style momentum messages from closed BTC 1s candles:
+`[BinanceSignal] BTC 1s UP ...` / `[BinanceSignal] BTC 1s DOWN ...`
 
 ### 3. Get Polymarket API credentials
 

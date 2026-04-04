@@ -29,6 +29,10 @@ pub struct Config {
     pub enable_database: bool,
     /// Enable ratatui dashboard in foreground (default false for console-only mode)
     pub enable_tui: bool,
+    /// Enable BTC 1s Binance kline momentum signal logs.
+    pub enable_binance_signal_1s: bool,
+    /// Sensitivity threshold for BTC 1s close-to-close signal (% move).
+    pub binance_signal_threshold_pct: f64,
 
     // ── Telegram ──────────────────────────────────────────────────────────────
     pub telegram_bot_token: Option<String>,
@@ -127,6 +131,8 @@ impl Config {
             enable_telegram: parse_bool("ENABLE_TELEGRAM", false),
             enable_database: parse_bool("ENABLE_DATABASE", false),
             enable_tui: parse_bool("ENABLE_TUI", false),
+            enable_binance_signal_1s: parse_bool("ENABLE_BINANCE_SIGNAL_1S", true),
+            binance_signal_threshold_pct: parse_f64("BINANCE_SIGNAL_THRESHOLD_PCT", 0.01)?,
 
             // Telegram
             telegram_bot_token: env::var("TELEGRAM_BOT_TOKEN").ok(),

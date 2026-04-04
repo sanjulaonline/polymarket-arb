@@ -382,8 +382,10 @@ async fn main() -> Result<()> {
     // Binance feed (BTC + ETH)
     {
         let tx = raw_tx.clone();
+        let enable_signal_1s = cfg.enable_binance_signal_1s;
+        let signal_threshold_pct = cfg.binance_signal_threshold_pct;
         handles.push(tokio::spawn(async move {
-            let feed = BinanceFeed::new(tx);
+            let feed = BinanceFeed::new(tx, enable_signal_1s, signal_threshold_pct);
             if let Err(e) = feed.run().await { error!("[Binance] fatal: {e}"); }
         }));
     }
