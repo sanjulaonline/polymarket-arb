@@ -135,6 +135,8 @@ pub struct MarketSnapshot {
     pub timestamp: DateTime<Utc>,
     /// Outputs from all three models
     pub models: ModelOutput,
+    /// Which strategy triggered this snapshot ("SNIPER" or "QUANT")
+    pub strategy: String,
 }
 
 impl MarketSnapshot {
@@ -160,6 +162,7 @@ impl MarketSnapshot {
             direction_up,
             timestamp: Utc::now(),
             models: ModelOutput::default(),
+            strategy: "QUANT".to_string(),
         }
     }
 
@@ -178,6 +181,10 @@ impl MarketSnapshot {
     }
 
     pub fn has_edge(&self, min_edge_pct: f64, min_confidence: f64) -> bool {
+        if self.strategy == "SNIPER" {
+            // Sniper overrides these thresholds because it relies purely on lag
+            return true;
+        }
         self.effective_edge_pct() >= min_edge_pct && self.confidence >= min_confidence
     }
 }

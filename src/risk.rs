@@ -22,6 +22,8 @@ pub struct RiskManager {
     poly_lookup_count: Arc<AtomicI64>,
     /// Number of detector lookups that needed direct fallback polling
     poly_fallback_count: Arc<AtomicI64>,
+    /// Live lag tracker: mapping format!("BTC {}", timeframe) -> lag_pp
+    pub latest_lags: Arc<dashmap::DashMap<String, f64>>,
 }
 
 impl RiskManager {
@@ -36,6 +38,7 @@ impl RiskManager {
             poly_last_tick_age_ms: Arc::new(AtomicI64::new(-1)),
             poly_lookup_count: Arc::new(AtomicI64::new(0)),
             poly_fallback_count: Arc::new(AtomicI64::new(0)),
+            latest_lags: Arc::new(dashmap::DashMap::new()),
         }
     }
 

@@ -379,9 +379,11 @@ impl Detector {
 
             // ── Step 5: fast pre-filter ────────────────────────────────────────
             let lag_pp = (cex_prob - poly_prob).abs() * 100.0;
+            self.risk.latest_lags.insert(format!("{}", slot.timeframe), lag_pp);
             let bayes_edge_pp = (posterior - poly_prob).abs() * 100.0;
-            let prefilter_pp = self.cfg.lag_threshold_pp.max(self.cfg.min_edge_pct);
-            let prefilter_pass = lag_pp >= prefilter_pp || bayes_edge_pp >= prefilter_pp;
+            let raw_predictor_pass = lag_pp >= self.cfg.lag_threshold_pp;
+            let quant_predictor_pass = bayes_edge_pp >= self.cfg.min_edge_pct;
+            let prefilter_pass = raw_predictor_pass || quant_predictor_pass;
 
             let compare_due = slot.asset == Asset::Btc
                 && state
@@ -422,10 +424,9 @@ impl Detector {
                 None
             };
 
-            // Must exceed lag threshold from either raw CEX or Bayesian
             if !prefilter_pass {
-                debug!("[Detector] {:?}/{:?} lag={:.1}pp bayes_edge={:.1}pp prefilter={:.1}pp — skip",
-                    slot.asset, slot.timeframe, lag_pp, bayes_edge_pp, prefilter_pp);
+                debug!("[Detector] {:?}/{:?} lag={:.1}pp bayes_edge={:.1}pp — skip",
+                    slot.asset, slot.timeframe, lag_pp, bayes_edge_pp);
                 (None, ModelOutput::default(), compare_log)
             } else {
                 // ── Step 6: confidence score ───────────────────────────────────
@@ -462,7 +463,15 @@ impl Detector {
                     posterior_variance: bayes_summary.variance,
                     effective_n: bayes_summary.effective_n,
                 };
-                let kelly_out = kelly_size(&kelly_inp);
+                let mut kelly_out = kelly_size(&kelly_inp);
+                let strategy_path = if raw_predictor_pass {
+                    kelly_out.has_edge = true;
+                    // Calculate simple size based on fixed fraction of portfolio
+                    kelly_out.size_usdc = self.cfg.portfolio_size_usdc * (self.cfg.risk_pct_per_trade / 100.0);
+                    "SNIPER"
+                } else {
+                    "QUANT"
+                };
 
                 // Build model output
                 let model_out = ModelOutput {
@@ -490,6 +499,7 @@ impl Detector {
                 snap.models = model_out.clone();
                 snap.direction_up = direction_up;
                 snap.poly_entry_prob = entry_price.clamp(0.01, 0.99);
+                snap.strategy = strategy_path.to_string();
 
                 (Some(snap), model_out, compare_log)
             }
@@ -582,7 +592,8 @@ impl Detector {
             }
 
             info!(
-                "[Detector] ✦ {:?}/{:?} | bayes={:.4} [{:.3}–{:.3}] | r={:.4} | kelly=${:.2} | edge={:.1}% conf={:.0}% dir={}",
+                "[Detector] ✦ [{}] {:?}/{:?} | bayes={:.4} [{:.3}–{:.3}] | r={:.4} | kelly=${:.2} | edge={:.1}% conf={:.0}% dir={}",
+                snap.strategy,
                 slot.asset, slot.timeframe,
                 snap.models.bayesian_posterior, snap.models.ci_lo, snap.models.ci_hi,
                 snap.models.reservation_price,
@@ -786,8 +797,9 @@ impl Detector {
                 }
             }
             info!(
-                "[Paper] #{row_id} {asset_str}/{tf_str} {direction_str} ${size_usdc:.2} \
+                "[{}] [Paper] #{row_id} {asset_str}/{tf_str} {direction_str} ${size_usdc:.2} \
                  bayes={:.4} r={:.4} kelly_f={:.3} edge={:.1}%",
+                snap.strategy,
                 snap.models.bayesian_posterior, snap.models.reservation_price,
                 snap.models.full_kelly_fraction, snap.effective_edge_pct()
             );

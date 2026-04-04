@@ -110,11 +110,12 @@ impl Dashboard {
         let stats_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
+                Constraint::Ratio(1, 6),
+                Constraint::Ratio(1, 6),
+                Constraint::Ratio(1, 6),
+                Constraint::Ratio(1, 6),
+                Constraint::Ratio(1, 6),
+                Constraint::Ratio(1, 6),
             ])
             .split(chunks[1]);
 
@@ -137,6 +138,16 @@ impl Dashboard {
         } else {
             Color::Green
         };
+
+        let mut max_lag = 0.0_f64;
+        let mut lag_vec: Vec<String> = self.risk.latest_lags.iter().map(|ref kv| {
+            let v = *kv.value();
+            if v > max_lag { max_lag = v; }
+            format!("{}: {:.2}%", kv.key(), v)
+        }).collect();
+        lag_vec.sort();
+        let lag_str = if lag_vec.is_empty() { "Waiting...".to_string() } else { lag_vec.join(" | ") };
+        let lag_color = if max_lag >= self.cfg.lag_threshold_pp { Color::Green } else if max_lag >= 0.1 { Color::Yellow } else { Color::DarkGray };
 
         let stat_widgets = [
             (
@@ -163,6 +174,11 @@ impl Dashboard {
                 "Poly Data",
                 format!("{} | {:.1}% fb", poly_age_str, poly_fallback_rate),
                 poly_color,
+            ),
+            (
+                "Live Lag (Poly vs CEX)",
+                lag_str,
+                lag_color,
             ),
         ];
 
