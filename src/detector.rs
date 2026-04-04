@@ -222,14 +222,12 @@ impl Detector {
 
     pub async fn run(&self, mut rx: broadcast::Receiver<PriceTick>) -> Result<()> {
         info!(
-            "[Detector] LatencyArb pipeline | window={}s thr={:+.3}% up_range=[{:.2},{:.2}] edge>={:.3} spread<={:.3} settle_buf={}s | {}",
-            self.cfg.price_window_seconds,
+            "[Detector] OracleLag pipeline | move_from_open>={:+.3}% time_left>{}s entry<=${:.2} oracle_stale<={}s spread<={:.3} | {}",
             self.cfg.price_change_threshold_pct,
-            self.cfg.polymarket_min_price,
-            self.cfg.polymarket_max_price,
-            self.cfg.min_edge,
-            self.cfg.max_spread,
             self.cfg.settlement_buffer_seconds,
+            self.cfg.polymarket_max_price,
+            self.cfg.oracle_staleness_limit_secs,
+            self.cfg.max_spread,
             if self.cfg.is_live() { "LIVE" } else { "PAPER" }
         );
 
@@ -248,11 +246,8 @@ impl Detector {
 
                     if self.risk.is_halted() { continue; }
 
-                    // Evaluate instantly on fast feeds to catch lag spikes <100ms
-                    if !matches!(
-                        tick.source,
-                        PriceSource::Polymarket | PriceSource::Binance | PriceSource::PolymarketWs
-                    ) {
+                    // Strategy is oracle-driven: evaluate on each oracle (Polymarket Chainlink) tick.
+                    if !matches!(tick.source, PriceSource::PolymarketWs) {
                         continue;
                     }
 
@@ -331,12 +326,12 @@ impl Detector {
     }
 
     async fn check_slot_latency_arb(&self, slot: &ContractSlot) {
-        let (price_now, binance_age_ms) = match self.binance_snapshot(slot.asset) {
+        let (oracle_now, oracle_age_ms) = match self.poly_ws_snapshot(slot.asset) {
             Some(v) => v,
             None => return,
         };
 
-        if binance_age_ms > 3_000 {
+        if oracle_age_ms > (self.cfg.oracle_staleness_limit_secs as i64 * 1_000) {
             return;
         }
 
@@ -360,19 +355,12 @@ impl Detector {
 
         self.risk.note_poly_tick_age_ms(poly_tick_age_ms);
 
-        if !(self.cfg.polymarket_min_price <= up_mid && up_mid <= self.cfg.polymarket_max_price) {
-            return;
-        }
-
         let key = Self::slot_state_key(slot.asset, slot.timeframe);
-        let now_ms = Utc::now().timestamp_millis();
-        let lookback_secs = self.cfg.price_window_seconds as i64;
-
-        let price_then = {
+        let open_price = {
             let mut states = self.states.lock();
             let state = states.entry(key).or_insert_with(|| {
                 let max_shares = self.cfg.max_position_usdc() / 0.50;
-                let init_strike = if slot.strike > 0.0 { slot.strike } else { price_now };
+                let init_strike = if slot.strike > 0.0 { slot.strike } else { oracle_now };
                 SlotState::new(up_mid, init_strike, &self.cfg, max_shares, slot.time_to_expiry_secs())
             });
 
@@ -385,24 +373,15 @@ impl Detector {
             }
             state.last_signal_eval = Some(Instant::now());
 
-            state.price_history.push_back((now_ms, price_now));
-            let keep_ms = (lookback_secs + 5).max(10) * 1_000;
-            while let Some((ts, _)) = state.price_history.front() {
-                if now_ms - *ts > keep_ms {
-                    let _ = state.price_history.pop_front();
-                } else {
-                    break;
-                }
-            }
-            Self::price_n_seconds_ago(&state.price_history, now_ms, lookback_secs)
+            // For up/down contracts, the reference is the oracle price at bucket open.
+            self.updown_reference_strike(state, slot.timeframe, oracle_now)
         };
 
-        let price_then = match price_then {
-            Some(p) if p > 0.0 => p,
-            _ => return,
-        };
+        if open_price <= 0.0 {
+            return;
+        }
 
-        let pct_change = ((price_now - price_then) / price_then) * 100.0;
+        let pct_change = ((oracle_now - open_price) / open_price) * 100.0;
         let direction_up = if pct_change >= self.cfg.price_change_threshold_pct {
             true
         } else if pct_change <= -self.cfg.price_change_threshold_pct {
@@ -411,6 +390,11 @@ impl Detector {
             return;
         };
 
+        let secs_left = slot.time_to_expiry_secs();
+        if secs_left <= self.cfg.settlement_buffer_seconds as f64 {
+            return;
+        }
+
         let yes_bid = best_bid_prob.unwrap_or(up_mid).clamp(0.0, 1.0);
         let yes_ask = best_ask_prob.unwrap_or(up_mid).clamp(0.0, 1.0);
         let spread = (yes_ask - yes_bid).max(0.0);
@@ -418,80 +402,65 @@ impl Detector {
             return;
         }
 
-        let fair_up_prob = estimate_fair_up_probability(pct_change);
-        let (entry_prob, fair_prob) = if direction_up {
-            (yes_ask.clamp(0.01, 0.99), fair_up_prob)
+        let entry_prob = if direction_up {
+            yes_ask.clamp(0.01, 0.99)
         } else {
-            ((1.0 - yes_bid).clamp(0.01, 0.99), (1.0 - fair_up_prob).clamp(0.01, 0.99))
+            // Approximate NO ask from YES bid when NO top-of-book is unavailable.
+            (1.0 - yes_bid).clamp(0.01, 0.99)
         };
 
-        let edge = fair_prob - entry_prob;
-        if edge < self.cfg.min_edge {
+        if !(self.cfg.polymarket_min_price <= entry_prob && entry_prob <= self.cfg.polymarket_max_price) {
             return;
         }
 
-        let secs_left = slot.time_to_expiry_secs();
-        if secs_left < self.cfg.settlement_buffer_seconds as f64 {
-            return;
-        }
-
-        let kelly_out = kelly_size(&KellyInput {
-            posterior: fair_prob,
-            entry_price: entry_prob,
-            kelly_fraction: self.cfg.kelly_fraction,
-            portfolio_usdc: self.cfg.portfolio_size_usdc,
-            max_position_usdc: self.cfg.max_position_usdc(),
-            inventory_q: 0.0,
-            posterior_variance: 0.0,
-            effective_n: self.cfg.price_window_seconds.max(1) as f64,
-        });
-
-        if !kelly_out.has_edge || kelly_out.size_usdc <= 0.0 {
+        // Oracle-lag style sizing: fixed risk fraction per trade.
+        let target_size = self.cfg.portfolio_size_usdc * (self.cfg.risk_pct_per_trade / 100.0);
+        if target_size <= 0.0 {
             return;
         }
 
         let mut snap = MarketSnapshot::new(
             slot.asset,
             slot.timeframe,
-            price_now,
+            oracle_now,
             up_mid,
-            fair_up_prob,
+            up_mid,
             1.0,
         );
         snap.direction_up = direction_up;
         snap.poly_entry_prob = entry_prob;
-        snap.edge_pct = edge * 100.0;
-        snap.strategy = "SNIPER".to_string();
+        // Use oracle move magnitude as signal-strength telemetry.
+        snap.edge_pct = pct_change.abs();
+        snap.strategy = "ORACLE_LAG".to_string();
         snap.models = ModelOutput {
-            bayesian_posterior: fair_prob,
-            ci_lo: fair_prob,
-            ci_hi: fair_prob,
+            bayesian_posterior: up_mid,
+            ci_lo: up_mid,
+            ci_hi: up_mid,
             posterior_variance: 0.0,
-            effective_n: self.cfg.price_window_seconds as f64,
-            bayes_ready: true,
-            reservation_price: fair_prob,
+            effective_n: 1.0,
+            bayes_ready: false,
+            reservation_price: up_mid,
             half_spread: spread / 2.0,
             stoikov_bid: (entry_prob - spread / 2.0).clamp(0.0, 1.0),
             stoikov_ask: (entry_prob + spread / 2.0).clamp(0.0, 1.0),
             inventory_q: 0.0,
             variance: 0.0,
-            stoikov_ready: true,
-            kelly_size_usdc: kelly_out.size_usdc,
-            full_kelly_fraction: kelly_out.full_kelly,
+            stoikov_ready: false,
+            kelly_size_usdc: target_size,
+            full_kelly_fraction: 0.0,
             kelly_has_edge: true,
         };
 
         info!(
-            "[LatencyArb] {:?}/{:?} {} | BTC {:.2}->{:.2} ({:+.3}%) | pm={:.4} fair={:.4} edge={:+.4}",
+            "[OracleLag] {:?}/{:?} {} | oracle_open={:.2} oracle_now={:.2} ({:+.3}%) | time_left={:.0}s entry={:.4}",
             slot.asset,
             slot.timeframe,
             if direction_up { "UP" } else { "DOWN" },
-            price_then,
-            price_now,
+            open_price,
+            oracle_now,
             pct_change,
+            secs_left,
             entry_prob,
-            fair_prob,
-            edge
         );
 
         self.execute(slot, &snap).await;

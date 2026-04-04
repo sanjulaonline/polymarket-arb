@@ -47,6 +47,8 @@ pub struct Config {
     pub price_window_seconds: u64,
     /// Trigger threshold for Binance move over the lookback window (%).
     pub price_change_threshold_pct: f64,
+    /// Maximum allowed oracle feed staleness in seconds.
+    pub oracle_staleness_limit_secs: u64,
     /// Reject signals when UP price is outside this range (already repriced).
     pub polymarket_min_price: f64,
     pub polymarket_max_price: f64,
@@ -152,7 +154,7 @@ impl Config {
                 .unwrap_or_else(|_| "btc".into()),
             market_timeframes: parse_timeframes(
                 "MARKET_TIMEFRAMES",
-                &[Timeframe::FiveMin, Timeframe::FifteenMin],
+                &[Timeframe::FifteenMin],
             )?,
 
             // Feature toggles
@@ -168,11 +170,12 @@ impl Config {
 
             // Strategy
             price_window_seconds: parse_u64("PRICE_WINDOW_SECONDS", 30)?,
-            price_change_threshold_pct: parse_f64("PRICE_CHANGE_THRESHOLD_PCT", 0.4)?,
-            polymarket_min_price: parse_f64("POLYMARKET_MIN_PRICE", 0.35)?,
-            polymarket_max_price: parse_f64("POLYMARKET_MAX_PRICE", 0.65)?,
-            min_edge: parse_f64("MIN_EDGE", 0.10)?,
-            settlement_buffer_seconds: parse_u64("SETTLEMENT_BUFFER_SECONDS", 60)?,
+            price_change_threshold_pct: parse_f64("PRICE_CHANGE_THRESHOLD_PCT", 0.07)?,
+            oracle_staleness_limit_secs: parse_u64("ORACLE_STALENESS_LIMIT_SECS", 15)?,
+            polymarket_min_price: parse_f64("POLYMARKET_MIN_PRICE", 0.00)?,
+            polymarket_max_price: parse_f64("POLYMARKET_MAX_PRICE", 0.62)?,
+            min_edge: parse_f64("MIN_EDGE", 0.00)?,
+            settlement_buffer_seconds: parse_u64("SETTLEMENT_BUFFER_SECONDS", 300)?,
             max_spread: parse_f64("MAX_SPREAD", 0.05)?,
             lag_threshold_pp: parse_f64("LAG_THRESHOLD_PP", 3.0)?,
             min_edge_pct: parse_f64("MIN_EDGE_PCT", 5.0)?,

@@ -4,6 +4,7 @@ use anyhow::Result;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, info, warn};
@@ -16,6 +17,9 @@ pub struct PolymarketLiveWsFeed {
     symbol_includes: String,
     tx: broadcast::Sender<PriceTick>,
 }
+
+const READ_TIMEOUT_SECS: u64 = 10;
+const STALL_TIMEOUT_SECS: u64 = 30;
 
 impl PolymarketLiveWsFeed {
     pub fn new(ws_url: &str, symbol_includes: &str, tx: broadcast::Sender<PriceTick>) -> Self {
@@ -55,6 +59,7 @@ impl PolymarketLiveWsFeed {
             self.ws_url,
             self.symbol_includes
         );
+        let mut last_price_update = Instant::now();
 
         let subscribe = json!({
             "action": "subscribe",
@@ -68,17 +73,35 @@ impl PolymarketLiveWsFeed {
         });
         ws.send(Message::Text(subscribe.to_string())).await?;
 
-        while let Some(msg) = ws.next().await {
-            let msg = msg?;
+        loop {
+            let msg = match tokio::time::timeout(Duration::from_secs(READ_TIMEOUT_SECS), ws.next()).await {
+                Ok(Some(msg)) => msg?,
+                Ok(None) => return Ok(()),
+                Err(_) => {
+                    if last_price_update.elapsed() >= Duration::from_secs(STALL_TIMEOUT_SECS) {
+                        warn!(
+                            "[PolymarketLiveWS] Stream stalled (no price updates for {}s). Forcing reconnect...",
+                            STALL_TIMEOUT_SECS
+                        );
+                        return Ok(());
+                    }
+                    // Keep connection active and provoke a response even if only control frames were flowing.
+                    ws.send(Message::Ping(Vec::new())).await?;
+                    continue;
+                }
+            };
+
             match msg {
                 Message::Text(text) => {
                     if let Some(tick) = self.parse_tick(&text) {
+                        last_price_update = Instant::now();
                         let _ = self.tx.send(tick);
                     }
                 }
                 Message::Binary(bin) => {
                     if let Ok(text) = std::str::from_utf8(&bin) {
                         if let Some(tick) = self.parse_tick(text) {
+                            last_price_update = Instant::now();
                             let _ = self.tx.send(tick);
                         }
                     }
@@ -93,8 +116,6 @@ impl PolymarketLiveWsFeed {
                 _ => {}
             }
         }
-
-        Ok(())
     }
 
     fn parse_tick(&self, raw: &str) -> Option<PriceTick> {

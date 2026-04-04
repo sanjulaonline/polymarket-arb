@@ -102,7 +102,7 @@ Set candle windows with `MARKET_TIMEFRAMES` in `.env`:
 ```env
 MARKET_TIMEFRAMES=5m      # only 5-minute contracts
 MARKET_TIMEFRAMES=15m     # only 15-minute contracts
-MARKET_TIMEFRAMES=5m,15m  # both (default)
+MARKET_TIMEFRAMES=5m,15m  # both (optional)
 ```
 
 Optional fast Binance signal knobs (in `.env`):
@@ -128,20 +128,20 @@ allowing only one open position per `(asset,timeframe)` slot.
 Latency-arb signal knobs (in `.env`):
 
 ```env
-PRICE_WINDOW_SECONDS=30
-PRICE_CHANGE_THRESHOLD_PCT=0.4
-POLYMARKET_MIN_PRICE=0.35
-POLYMARKET_MAX_PRICE=0.65
-MIN_EDGE=0.10
-SETTLEMENT_BUFFER_SECONDS=60
+PRICE_CHANGE_THRESHOLD_PCT=0.07
+ORACLE_STALENESS_LIMIT_SECS=15
+POLYMARKET_MIN_PRICE=0.00
+POLYMARKET_MAX_PRICE=0.62
+MIN_EDGE=0.00
+SETTLEMENT_BUFFER_SECONDS=300
 MAX_SPREAD=0.05
 ```
 
 Signal flow is now:
-1. Compare Binance `price_now` vs `price_N_seconds_ago`.
-2. Trigger `UP`/`DOWN` only if move exceeds `PRICE_CHANGE_THRESHOLD_PCT`.
-3. Estimate fair UP probability with a logistic momentum map.
-4. Enter only when Polymarket is still in stale range (`POLYMARKET_MIN_PRICE..POLYMARKET_MAX_PRICE`) and positive edge (`fair - price >= MIN_EDGE`) remains after spread and settlement-buffer checks.
+1. On every Chainlink oracle tick (`POLYMARKET_LIVE_WS_URL`), compute oracle move vs the market-open oracle reference for each slot.
+2. Trigger `UP`/`DOWN` only if absolute move exceeds `PRICE_CHANGE_THRESHOLD_PCT`.
+3. Require at least `SETTLEMENT_BUFFER_SECONDS` time remaining and a fresh oracle stream (`ORACLE_STALENESS_LIMIT_SECS`).
+4. Buy only when entry token price is within `POLYMARKET_MIN_PRICE..POLYMARKET_MAX_PRICE` (default cap: `$0.62`) and spread is within `MAX_SPREAD`.
 
 Optional Polymarket live Chainlink reference feed knobs (in `.env`):
 
