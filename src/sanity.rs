@@ -106,6 +106,17 @@ async fn check_clob_book(client: &PolymarketClient, slots: &[ContractSlot]) -> b
     !book.bids.is_empty() || !book.asks.is_empty()
 }
 
+async fn check_clob_midpoint(client: &PolymarketClient, slots: &[ContractSlot]) -> bool {
+    let Some(slot) = slots.first() else {
+        return false;
+    };
+
+    match client.get_token_midpoint(&slot.yes_token.token_id).await {
+        Ok(mid) => mid.is_finite() && (0.0..=1.0).contains(&mid),
+        Err(_) => false,
+    }
+}
+
 pub async fn run_startup_sanity(client: Arc<PolymarketClient>, slots: &[ContractSlot]) {
     let http = match apply_reqwest_proxy_from_env(Client::builder()) {
         Ok(builder) => builder.build().unwrap_or_else(|_| Client::new()),
@@ -116,16 +127,18 @@ pub async fn run_startup_sanity(client: Arc<PolymarketClient>, slots: &[Contract
     let comments_ok = check_gamma_comments(&http).await;
     let user_comments_ok = check_user_comments(&http).await;
     let clob_book_ok = check_clob_book(client.as_ref(), slots).await;
+    let clob_midpoint_ok = check_clob_midpoint(client.as_ref(), slots).await;
 
     info!(
-        "[Sanity] gamma_markets={} gamma_comments={} user_comments={} clob_book={}",
+        "[Sanity] gamma_markets={} gamma_comments={} user_comments={} clob_book={} clob_midpoint={}",
         markets_ok,
         comments_ok,
         user_comments_ok,
-        clob_book_ok
+        clob_book_ok,
+        clob_midpoint_ok
     );
 
-    if !(markets_ok && comments_ok && clob_book_ok) {
+    if !(markets_ok && comments_ok && (clob_book_ok || clob_midpoint_ok)) {
         warn!(
             "[Sanity] one or more startup checks failed; continuing in best-effort mode"
         );

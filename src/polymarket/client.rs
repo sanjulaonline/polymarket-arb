@@ -593,6 +593,72 @@ impl PolymarketClient {
         }
     }
 
+    fn parse_numeric_field(payload: &Value, field: &str) -> Result<f64> {
+        payload
+            .get(field)
+            .and_then(|p| match p {
+                Value::String(s) => s.trim().parse::<f64>().ok(),
+                Value::Number(n) => n.as_f64(),
+                _ => None,
+            })
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| anyhow!("missing or invalid {} field in response", field))
+    }
+
+    pub async fn get_token_midpoint(&self, token_id: &str) -> Result<f64> {
+        let path = "/midpoint";
+        let url = format!("{}{}", CLOB_BASE, path);
+        let resp = self
+            .http
+            .get(&url)
+            .query(&[("token_id", token_id)])
+            .send()
+            .await
+            .with_context(|| format!("GET /midpoint for token {}", token_id))?;
+
+        let status = resp.status();
+        let body = resp.text().await.context("read /midpoint body")?;
+        if !status.is_success() {
+            return Err(anyhow!(
+                "/midpoint failed with HTTP {} for token {}: {}",
+                status,
+                token_id,
+                &body[..body.len().min(200)]
+            ));
+        }
+
+        let payload: Value = serde_json::from_str(&body).context("parse /midpoint JSON")?;
+        let mid = Self::parse_numeric_field(&payload, "mid")?;
+        Ok(mid.clamp(0.0, 1.0))
+    }
+
+    pub async fn get_token_spread(&self, token_id: &str) -> Result<f64> {
+        let path = "/spread";
+        let url = format!("{}{}", CLOB_BASE, path);
+        let resp = self
+            .http
+            .get(&url)
+            .query(&[("token_id", token_id)])
+            .send()
+            .await
+            .with_context(|| format!("GET /spread for token {}", token_id))?;
+
+        let status = resp.status();
+        let body = resp.text().await.context("read /spread body")?;
+        if !status.is_success() {
+            return Err(anyhow!(
+                "/spread failed with HTTP {} for token {}: {}",
+                status,
+                token_id,
+                &body[..body.len().min(200)]
+            ));
+        }
+
+        let payload: Value = serde_json::from_str(&body).context("parse /spread JSON")?;
+        let spread = Self::parse_numeric_field(&payload, "spread")?;
+        Ok(spread.max(0.0))
+    }
+
     pub async fn get_token_best_price(&self, token_id: &str, side: OrderSide) -> Result<f64> {
         let side_str = match side {
             OrderSide::Buy => "BUY",
@@ -622,14 +688,7 @@ impl PolymarketClient {
         }
 
         let payload: Value = serde_json::from_str(&body).context("parse /price JSON")?;
-        let price = payload
-            .get("price")
-            .and_then(|p| match p {
-                Value::String(s) => s.trim().parse::<f64>().ok(),
-                Value::Number(n) => n.as_f64(),
-                _ => None,
-            })
-            .ok_or_else(|| anyhow!("missing price field in /price response"))?;
+        let price = Self::parse_numeric_field(&payload, "price")?;
 
         Ok(price)
     }
@@ -1218,8 +1277,19 @@ impl PolymarketClient {
 
     /// Raw mid-price probability from YES token order book (0.0–1.0).
     pub async fn mid_probability(&self, token_id: &str) -> Result<f64> {
-        let book = self.get_order_book(token_id).await?;
-        book.mid_price().ok_or_else(|| anyhow!("Empty order book for {}", token_id))
+        match self.get_token_midpoint(token_id).await {
+            Ok(mid) => Ok(mid),
+            Err(e) => {
+                debug!(
+                    "[Client] /midpoint unavailable for token {}: {}. Falling back to /book midpoint",
+                    token_id,
+                    e
+                );
+                let book = self.get_order_book(token_id).await?;
+                book.mid_price()
+                    .ok_or_else(|| anyhow!("Empty order book for {}", token_id))
+            }
+        }
     }
 
     /// Place a Fill-or-Kill order. Returns order id on success.

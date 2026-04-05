@@ -349,9 +349,29 @@ impl Detector {
                     match self.client.get_order_book(&slot.yes_token.token_id).await {
                         Ok(book) => match book.best_bid_ask() {
                             Some((bid, ask)) => ((bid + ask) / 2.0, 0.0, 0, Some(bid), Some(ask)),
-                            None => return,
+                            None => match self.client.get_token_midpoint(&slot.yes_token.token_id).await {
+                                Ok(mid) => {
+                                    debug!(
+                                        "[Detector] {:?}/{:?} using /midpoint fallback (empty /book)",
+                                        slot.asset,
+                                        slot.timeframe
+                                    );
+                                    (mid, 0.0, 0, None, None)
+                                }
+                                Err(_) => return,
+                            },
                         },
-                        Err(_) => return,
+                        Err(_) => match self.client.get_token_midpoint(&slot.yes_token.token_id).await {
+                            Ok(mid) => {
+                                debug!(
+                                    "[Detector] {:?}/{:?} using /midpoint fallback (/book error)",
+                                    slot.asset,
+                                    slot.timeframe
+                                );
+                                (mid, 0.0, 0, None, None)
+                            }
+                            Err(_) => return,
+                        },
                     }
                 }
             };
@@ -489,16 +509,43 @@ impl Detector {
                         match book.best_bid_ask() {
                             Some((bid, ask)) => ((bid + ask) / 2.0, depth, 0, Some(bid), Some(ask)),
                             None => {
+                                match self.client.get_token_midpoint(&slot.yes_token.token_id).await {
+                                    Ok(mid) => {
+                                        debug!(
+                                            "[Detector] empty poly book ({:?}/{:?}) — using /midpoint fallback",
+                                            slot.asset,
+                                            slot.timeframe
+                                        );
+                                        (mid, 0.0, 0, None, None)
+                                    }
+                                    Err(_) => {
+                                        debug!(
+                                            "[Detector] empty poly book ({:?}/{:?})",
+                                            slot.asset,
+                                            slot.timeframe
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        match self.client.get_token_midpoint(&slot.yes_token.token_id).await {
+                            Ok(mid) => {
                                 debug!(
-                                    "[Detector] empty poly book ({:?}/{:?})",
+                                    "[Detector] poly_prob err ({:?}/{:?}): {e}. Using /midpoint fallback",
                                     slot.asset,
                                     slot.timeframe
                                 );
+                                (mid, 0.0, 0, None, None)
+                            }
+                            Err(_) => {
+                                debug!("[Detector] poly_prob err ({:?}/{:?}): {e}", slot.asset, slot.timeframe);
                                 return;
                             }
                         }
                     }
-                    Err(e) => { debug!("[Detector] poly_prob err ({:?}/{:?}): {e}", slot.asset, slot.timeframe); return; }
                 }
             }
         };

@@ -103,6 +103,15 @@ impl PolymarketPoller {
                         last_published_tick = Instant::now();
                     } else {
                         consecutive_empty_books = consecutive_empty_books.saturating_add(1);
+                        if self
+                            .publish_midpoint_fallback(&active_token_id, "empty_or_invalid_book")
+                            .await
+                        {
+                            consecutive_empty_books = 0;
+                            last_published_tick = Instant::now();
+                            continue;
+                        }
+
                         if consecutive_empty_books >= 5
                             && last_rotate_attempt.elapsed() >= Duration::from_secs(2)
                         {
@@ -131,6 +140,15 @@ impl PolymarketPoller {
                     }
                 }
                 Err(e) => {
+                    if self
+                        .publish_midpoint_fallback(&active_token_id, "book_error")
+                        .await
+                    {
+                        consecutive_empty_books = 0;
+                        last_published_tick = Instant::now();
+                        continue;
+                    }
+
                     let e_txt = e.to_string();
                     if Self::is_missing_orderbook_error(&e_txt) {
                         if last_rotate_attempt.elapsed() >= Duration::from_secs(2) {
@@ -161,6 +179,44 @@ impl PolymarketPoller {
                         warn!("[Polymarket/{:?}/{:?}] poll error: {e}", self.asset, self.timeframe);
                     }
                 }
+            }
+        }
+    }
+
+    async fn publish_midpoint_fallback(&self, token_id: &str, reason: &str) -> bool {
+        match self.client.get_token_midpoint(token_id).await {
+            Ok(mid) => {
+                debug!(
+                    "[Polymarket/{:?}/{:?}] {}: midpoint fallback mid={:.4} token={}",
+                    self.asset,
+                    self.timeframe,
+                    reason,
+                    mid,
+                    Self::short_token(token_id)
+                );
+
+                let _ = self.tx.send(PriceTick {
+                    source: PriceSource::Polymarket,
+                    asset: self.asset,
+                    timeframe: Some(self.timeframe),
+                    book_depth_usdc: None,
+                    book_best_bid_prob: None,
+                    book_best_ask_prob: None,
+                    price: mid,
+                    timestamp: Utc::now(),
+                });
+                true
+            }
+            Err(e) => {
+                debug!(
+                    "[Polymarket/{:?}/{:?}] {}: midpoint fallback failed for token {}: {}",
+                    self.asset,
+                    self.timeframe,
+                    reason,
+                    Self::short_token(token_id),
+                    e
+                );
+                false
             }
         }
     }
