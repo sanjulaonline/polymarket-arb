@@ -81,6 +81,8 @@ struct GammaMarket {
     outcomes: Option<Value>,
     #[serde(rename = "endDate")]
     end_date: Option<String>,
+    #[serde(default, alias = "accepting_orders", alias = "acceptingOrders")]
+    accepting_orders: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -445,6 +447,7 @@ impl PolymarketClient {
         let timestamps = [
             current_bucket_start.timestamp(),
             current_bucket_start.timestamp() + interval_secs,
+            current_bucket_start.timestamp() - interval_secs,
         ];
         let now_ts = Utc::now().timestamp();
 
@@ -461,6 +464,14 @@ impl PolymarketClient {
             let Some(market) = event.markets.first() else {
                 continue;
             };
+
+            if matches!(market.accepting_orders, Some(false)) {
+                debug!(
+                    "[Client] skipping closed slug {} because accepting_orders=false",
+                    slug
+                );
+                continue;
+            }
 
             let expiration = market
                 .end_date
@@ -517,6 +528,7 @@ impl PolymarketClient {
         let canonical_resp = self
             .http
             .get(&canonical_url)
+            .timeout(std::time::Duration::from_secs(10))
             .send()
             .await
             .with_context(|| format!("GET gamma event by slug {slug}"))?;
@@ -538,6 +550,7 @@ impl PolymarketClient {
         let fallback_resp = self
             .http
             .get(&fallback_url)
+            .timeout(std::time::Duration::from_secs(10))
             .send()
             .await
             .with_context(|| format!("GET gamma events fallback for slug {slug}"))?;
@@ -565,13 +578,13 @@ impl PolymarketClient {
         let token_ids = market
             .clob_token_ids
             .as_ref()
-            .and_then(Self::json_value_to_vec)
-            .ok_or_else(|| anyhow!("missing clobTokenIds for slug {}", slug))?;
+            .ok_or_else(|| anyhow!("missing clobTokenIds for slug {}", slug))
+            .and_then(|v| Self::json_value_to_vec(v, "clobTokenIds"))?;
         let outcomes = market
             .outcomes
             .as_ref()
-            .and_then(Self::json_value_to_vec)
-            .ok_or_else(|| anyhow!("missing outcomes for slug {}", slug))?;
+            .ok_or_else(|| anyhow!("missing outcomes for slug {}", slug))
+            .and_then(|v| Self::json_value_to_vec(v, "outcomes"))?;
 
         let mut up_token = None;
         let mut down_token = None;
@@ -593,21 +606,27 @@ impl PolymarketClient {
         }
     }
 
-    fn json_value_to_vec(v: &Value) -> Option<Vec<String>> {
+    fn json_value_to_vec(v: &Value, field_name: &str) -> Result<Vec<String>> {
         match v {
-            Value::String(s) => serde_json::from_str::<Vec<String>>(s).ok(),
-            Value::Array(arr) => {
-                let out = arr
-                    .iter()
-                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                    .collect::<Vec<_>>();
-                if out.is_empty() {
-                    None
+            Value::String(s) => {
+                let parsed = serde_json::from_str::<Vec<String>>(s)
+                    .with_context(|| format!("parse {} string as JSON array", field_name))?;
+                if parsed.is_empty() {
+                    Err(anyhow!("{} array is empty", field_name))
                 } else {
-                    Some(out)
+                    Ok(parsed)
                 }
             }
-            _ => None,
+            Value::Array(arr) => {
+                let parsed = serde_json::from_value::<Vec<String>>(Value::Array(arr.clone()))
+                    .with_context(|| format!("parse {} array", field_name))?;
+                if parsed.is_empty() {
+                    Err(anyhow!("{} array is empty", field_name))
+                } else {
+                    Ok(parsed)
+                }
+            }
+            _ => Err(anyhow!("{} has invalid format", field_name)),
         }
     }
 
