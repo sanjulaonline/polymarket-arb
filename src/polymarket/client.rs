@@ -153,6 +153,8 @@ pub struct Token {
 pub struct OrderBook {
     pub bids: Vec<Level>,
     pub asks: Vec<Level>,
+    #[serde(default, deserialize_with = "de_opt_str_f64")]
+    pub min_order_size: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -175,6 +177,22 @@ fn de_str_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
         NumOrStr::Num(v) => Ok(v),
         NumOrStr::Str(s) => s.parse().map_err(serde::de::Error::custom),
     }
+}
+
+fn de_opt_str_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumStrOrNull {
+        Num(f64),
+        Str(String),
+        Null,
+    }
+
+    Ok(match NumStrOrNull::deserialize(d)? {
+        NumStrOrNull::Num(v) => Some(v),
+        NumStrOrNull::Str(s) => s.parse::<f64>().ok(),
+        NumStrOrNull::Null => None,
+    })
 }
 
 /// Top-of-book helpers for Polymarket order books.

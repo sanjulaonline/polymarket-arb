@@ -43,6 +43,9 @@ use crate::{
 };
 
 const COMPARE_LOG_INTERVAL_MS: u64 = 1_000;
+const LIVE_ORDER_PRICE_DECIMALS: usize = 4;
+const LIVE_ORDER_SIZE_DECIMALS: usize = 2;
+const DEFAULT_MIN_TOKEN_AMOUNT: f64 = 5.0;
 
 type FeedKey = (PriceSource, Asset, Option<Timeframe>);
 type PolySnapshot = (f64, f64, i64, Option<f64>, Option<f64>);
@@ -52,6 +55,14 @@ fn estimate_fair_up_probability(pct_change: f64) -> f64 {
     let k = 50.0;
     let p = 1.0 / (1.0 + (-k * (pct_change / 100.0)).exp());
     p.clamp(0.05, 0.95)
+}
+
+fn floor_to_decimals(value: f64, decimals: usize) -> f64 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    let multiplier = 10_f64.powi(decimals as i32);
+    (value * multiplier).floor() / multiplier
 }
 
 #[derive(Clone, Debug)]
@@ -1075,12 +1086,19 @@ impl Detector {
 
         let token = if snap.direction_up { &slot.yes_token } else { &slot.no_token };
         let mut entry_prob = snap.poly_entry_prob.clamp(0.01, 0.99);
+        let mut min_token_amount = DEFAULT_MIN_TOKEN_AMOUNT;
 
         // For live orders, use executable top-of-book ask on the exact token being bought.
         if self.cfg.is_live() {
             match self.client.get_order_book(&token.token_id).await {
                 Ok(book) => match book.best_bid_ask() {
                     Some((bid, ask)) => {
+                        if let Some(min_size) = book.min_order_size {
+                            if min_size.is_finite() && min_size > 0.0 {
+                                min_token_amount = min_size;
+                            }
+                        }
+
                         let spread = (ask - bid).max(0.0);
                         if spread > 0.10 {
                             warn!(
@@ -1093,20 +1111,73 @@ impl Detector {
                         entry_prob = ask.clamp(0.01, 0.99);
                     }
                     None => {
-                        warn!(
-                            "[Executor] Missing best bid/ask for token {} — skip order",
-                            token.token_id
-                        );
-                        return;
+                        match self
+                            .client
+                            .get_token_best_price(&token.token_id, OrderSide::Buy)
+                            .await
+                        {
+                            Ok(ask) => {
+                                entry_prob = ask.clamp(0.01, 0.99);
+                                if let Ok(spread) = self.client.get_token_spread(&token.token_id).await {
+                                    if spread > 0.10 {
+                                        warn!(
+                                            "[Executor] Wide spread {:.4} on token {} via /spread — skip order",
+                                            spread,
+                                            token.token_id
+                                        );
+                                        return;
+                                    }
+                                }
+                                warn!(
+                                    "[Executor] Missing top-of-book for token {} — using /price BUY fallback",
+                                    token.token_id
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "[Executor] Missing best bid/ask for token {} and /price fallback failed: {}",
+                                    token.token_id,
+                                    e
+                                );
+                                return;
+                            }
+                        }
                     }
                 },
                 Err(e) => {
-                    warn!(
-                        "[Executor] Failed to refresh top-of-book ask for token {}: {}",
-                        token.token_id,
-                        e
-                    );
-                    return;
+                    match self
+                        .client
+                        .get_token_best_price(&token.token_id, OrderSide::Buy)
+                        .await
+                    {
+                        Ok(ask) => {
+                            entry_prob = ask.clamp(0.01, 0.99);
+                            if let Ok(spread) = self.client.get_token_spread(&token.token_id).await {
+                                if spread > 0.10 {
+                                    warn!(
+                                        "[Executor] Wide spread {:.4} on token {} via /spread — skip order",
+                                        spread,
+                                        token.token_id
+                                    );
+                                    return;
+                                }
+                            }
+                            warn!(
+                                "[Executor] /book failed for token {} ({}); using /price BUY fallback",
+                                token.token_id,
+                                e
+                            );
+                        }
+                        Err(e2) => {
+                            warn!(
+                                "[Executor] Failed to refresh quote for token {} (/book: {}; /price: {})",
+                                token.token_id,
+                                e,
+                                e2
+                            );
+                            return;
+                        }
+                    }
                 }
             }
         }
@@ -1160,38 +1231,76 @@ impl Detector {
             return;
         }
 
-        // Live order
-        let shares = (size_usdc / entry_prob).floor();
-        if shares < 1.0 { return; }
+        // Live order: quantize to Polymarket-friendly precision.
+        let order_price = floor_to_decimals(entry_prob, LIVE_ORDER_PRICE_DECIMALS).clamp(0.01, 0.99);
+        if !order_price.is_finite() || order_price <= 0.0 {
+            warn!(
+                "[Executor] Invalid quantized order price {:.6} for token {} — skip order",
+                order_price,
+                token.token_id
+            );
+            return;
+        }
+
+        let shares = floor_to_decimals(size_usdc / order_price, LIVE_ORDER_SIZE_DECIMALS);
+        if !shares.is_finite() || shares < min_token_amount {
+            warn!(
+                "[Executor] Share size {:.2} below minimum {:.2} for token {} — skip order",
+                shares,
+                min_token_amount,
+                token.token_id
+            );
+            return;
+        }
+
+        let order_notional_usdc = floor_to_decimals(shares * order_price, LIVE_ORDER_PRICE_DECIMALS);
+        if order_notional_usdc < self.cfg.min_trade_size_usdc {
+            warn!(
+                "[Executor] Quantized notional ${:.4} below MIN_TRADE_SIZE_USDC={:.4} — skip order",
+                order_notional_usdc,
+                self.cfg.min_trade_size_usdc
+            );
+            return;
+        }
+
+        let mut live_record = record.clone();
+        live_record.size_usdc = order_notional_usdc;
+        live_record.entry_prob = order_price;
 
         let t0 = Instant::now();
         match self.client.place_order(&OrderRequest {
-            token_id: token.token_id.clone(), price: entry_prob, size: shares,
+            token_id: token.token_id.clone(), price: order_price, size: shares,
             side: OrderSide::Buy, order_type: OrderType::Fok,
             time_in_force: TimeInForce::FillOrKill,
         }).await {
             Ok(order_id) => {
                 let ms = t0.elapsed().as_millis();
-                info!("[Executor] ✓ {order_id} | {asset_str}/{tf_str} {direction_str} ${size_usdc:.2} | {ms}ms");
-                self.risk.reserve_open_exposure(size_usdc);
+                info!(
+                    "[Executor] ✓ {order_id} | {asset_str}/{tf_str} {direction_str} ${:.4} @ {:.4} ({:.2} tokens) | {ms}ms",
+                    order_notional_usdc,
+                    order_price,
+                    shares
+                );
+                self.risk.reserve_open_exposure(order_notional_usdc);
                 self.risk.record_fill_success();
-                self.risk.record_slippage(entry_prob, entry_prob);
+                self.risk.record_slippage(order_price, order_price);
 
                 // Record fill in Stoikov inventory
                 {
                     let mut states = self.states.lock();
                     if let Some(state) = states.get_mut(&slot_key) {
                         state.last_trade_at = Some(Instant::now());
-                        state.stoikov.record_fill(shares, size_usdc, snap.direction_up);
+                        state
+                            .stoikov
+                            .record_fill(shares, order_notional_usdc, snap.direction_up);
                     }
                 }
 
-                let mut r2 = record.clone();
-                r2.order_id = Some(order_id.clone());
-                self.db.insert_trade(&r2).ok();
+                live_record.order_id = Some(order_id.clone());
+                self.db.insert_trade(&live_record).ok();
 
                 self.tg.trade_alert(false, &asset_str, &tf_str, direction_str,
-                    size_usdc, snap.effective_edge_pct(), snap.confidence, Some(&order_id)).await;
+                    order_notional_usdc, snap.effective_edge_pct(), snap.confidence, Some(&order_id)).await;
             }
             Err(e) => {
                 self.risk.record_missed_fill();

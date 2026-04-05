@@ -339,6 +339,11 @@ async fn main() -> Result<()> {
 
     if cfg.paper_trading {
         let mut bankroll_set = false;
+        let min_portfolio_for_trade = if cfg.risk_pct_per_trade > 0.0 {
+            cfg.min_trade_size_usdc / (cfg.risk_pct_per_trade / 100.0)
+        } else {
+            f64::INFINITY
+        };
 
         if let Some(proxy_wallet) = cfg.proxy_wallet.as_deref() {
             let rpc_candidates = polygon_rpc_candidates(&cfg);
@@ -346,6 +351,17 @@ async fn main() -> Result<()> {
                 let label = rpc_endpoint_label(rpc_url);
                 match poly_client.get_usdc_balance_onchain(rpc_url, proxy_wallet).await {
                     Ok(wallet_balance) if wallet_balance > 0.0 => {
+                        if wallet_balance < min_portfolio_for_trade {
+                            warn!(
+                                "[Init] Polygon balance ${:.2} is too small for min trade sizing (needs >= ${:.2} with RISK_PCT_PER_TRADE={} and MIN_TRADE_SIZE_USDC={:.4}); trying CLOB/fallback bankroll",
+                                wallet_balance,
+                                min_portfolio_for_trade,
+                                cfg.risk_pct_per_trade,
+                                cfg.min_trade_size_usdc
+                            );
+                            continue;
+                        }
+
                         let prev = cfg.portfolio_size_usdc;
                         cfg.portfolio_size_usdc = wallet_balance;
                         bankroll_set = true;
