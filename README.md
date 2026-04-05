@@ -300,28 +300,57 @@ Query trades directly: `sqlite3 trades.db "SELECT * FROM trades ORDER BY id DESC
 ## Project Structure
 
 ```
-src/
-├── main.rs           — task orchestration, startup, shutdown
-├── config.rs         — all env-var config with validation + defaults
-├── types.rs          — Asset, Timeframe, PriceTick, MarketSnapshot, TradeRecord
-├── confidence.rs     — 6-signal confidence scorer + CEX probability model
-├── kelly.rs          — fractional Kelly position sizing (with tests)
-├── risk.rs           — atomic kill switch, daily drawdown, win-rate tracking
-├── bayesian.rs       — Bayesian posterior update from price ticks
-├── stoikov.rs        — Inventory-aware reservation price and spread calculation
-├── detector.rs       — core strategy loop: Bayesian → Stoikov → Kelly → execute
-├── database.rs       — SQLite via rusqlite (WAL mode, insert/close/query)
-├── telegram.rs       — Telegram Bot API alerts
-├── dashboard.rs      — ratatui TUI: P&L, positions, last 10 trades
-├── feeds/
-│   ├── mod.rs        — PriceAggregator (multi-source, staleness-aware)
-│   ├── binance.rs    — Binance combined stream WS (BTC+ETH)
-│   ├── tradingview.rs — TradingView WS (per asset)
-│   └── cryptoquant.rs — CryptoQuant WS
-└── polymarket/
-    ├── mod.rs
-    ├── client.rs     — CLOB REST: HMAC auth, order book, FOK orders
-     └── poller.rs     — 50ms polling (configurable) → implied price broadcast
+.
+├── .github/
+│   ├── ISSUE_TEMPLATE/
+│   ├── pull_request_template.md
+│   └── workflows/ci.yml
+├── docs/
+│   ├── ARCHITECTURE.md
+│   └── PROJECT_STRUCTURE.md
+├── src/
+│   ├── main.rs            — task orchestration, startup, shutdown
+│   ├── config.rs          — env config with validation + defaults
+│   ├── detector.rs        — oracle-lag signal evaluation and execution trigger
+│   ├── risk.rs            — kill switch, drawdown, exposure caps
+│   ├── database.rs        — SQLite persistence
+│   ├── telegram.rs        — Telegram alerts
+│   ├── feeds/
+│   │   ├── mod.rs         — PriceAggregator (multi-source, staleness-aware)
+│   │   ├── binance.rs     — Binance combined stream WS (BTC+ETH)
+│   │   ├── tradingview.rs — TradingView WS (per asset)
+│   │   ├── cryptoquant.rs — CryptoQuant WS
+│   │   └── polymarket_live_ws.rs — Chainlink reference stream via Polymarket
+│   └── polymarket/
+│       ├── mod.rs
+│       ├── client.rs      — CLOB REST: auth, order book, FOK orders
+│       └── poller.rs      — polling → implied price broadcast
+├── .env.example
+├── CONTRIBUTING.md
+├── CODE_OF_CONDUCT.md
+├── SECURITY.md
+├── LICENSE
+└── README.md
+```
+
+---
+
+## Open-Source Contribution
+
+This repository is MIT licensed and ready for community contributions.
+
+- License: `LICENSE`
+- Contribution guide: `CONTRIBUTING.md`
+- Code of conduct: `CODE_OF_CONDUCT.md`
+- Security reporting: `SECURITY.md`
+- Issue templates and PR template: `.github/`
+
+Before opening a PR, run:
+
+```bash
+cargo fmt -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
 ```
 
 ---
