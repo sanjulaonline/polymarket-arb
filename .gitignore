@@ -10,6 +10,7 @@
 *.db
 *.db-shm
 *.db-wal
+runtime_state.json
 
 # Editor/OS files
 .vscode/

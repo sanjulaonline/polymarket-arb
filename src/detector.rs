@@ -44,6 +44,9 @@ use crate::{
 
 const COMPARE_LOG_INTERVAL_MS: u64 = 1_000;
 
+type FeedKey = (PriceSource, Asset, Option<Timeframe>);
+type PolySnapshot = (f64, f64, i64, Option<f64>, Option<f64>);
+
 fn estimate_fair_up_probability(pct_change: f64) -> f64 {
     // Logistic map from short-horizon move (%) to UP probability.
     let k = 50.0;
@@ -189,7 +192,7 @@ pub struct Detector {
     db: Arc<Database>,
     tg: Arc<Telegram>,
     contracts: Vec<ContractSlot>,
-    latest: Arc<DashMap<(PriceSource, Asset, Option<Timeframe>), PriceTick>>,
+    latest: Arc<DashMap<FeedKey, PriceTick>>,
     /// Per-slot model state, keyed by (asset_display, timeframe_display)
     states: Mutex<HashMap<(String, String), SlotState>>,
 }
@@ -202,7 +205,7 @@ impl Detector {
         db: Arc<Database>,
         tg: Arc<Telegram>,
         contracts: Vec<ContractSlot>,
-        latest: Arc<DashMap<(PriceSource, Asset, Option<Timeframe>), PriceTick>>,
+        latest: Arc<DashMap<FeedKey, PriceTick>>,
     ) -> Self {
         // Slot state is created lazily on first valid tick so priors and strike references
         // are seeded from timeframe-correct market data.
@@ -1168,7 +1171,7 @@ impl Detector {
         None
     }
 
-    fn poly_snapshot(&self, asset: Asset, timeframe: Timeframe) -> Option<(f64, f64, i64, Option<f64>, Option<f64>)> {
+    fn poly_snapshot(&self, asset: Asset, timeframe: Timeframe) -> Option<PolySnapshot> {
         if let Some(t) = self
             .latest
             .get(&(PriceSource::Polymarket, asset, Some(timeframe)))

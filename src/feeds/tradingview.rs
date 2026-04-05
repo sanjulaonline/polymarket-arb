@@ -161,11 +161,9 @@ impl TradingViewFeed {
 
     fn is_http_403(err: &anyhow::Error) -> bool {
         for cause in err.chain() {
-            if let Some(ws_err) = cause.downcast_ref::<WsError>() {
-                if let WsError::Http(resp) = ws_err {
-                    if resp.status().as_u16() == 403 {
-                        return true;
-                    }
+            if let Some(WsError::Http(resp)) = cause.downcast_ref::<WsError>() {
+                if resp.status().as_u16() == 403 {
+                    return true;
                 }
             }
         }
@@ -176,7 +174,7 @@ impl TradingViewFeed {
         if !payload.starts_with('{') {
             return None;
         }
-        let v: Value = serde_json::from_str(&payload).ok()?;
+        let v: Value = serde_json::from_str(payload).ok()?;
         if v.get("m")?.as_str()? != "qsd" {
             return None;
         }
