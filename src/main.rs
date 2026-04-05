@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod bayesian;
+mod comments;
 mod confidence;
 mod config;
 mod dashboard;
@@ -11,6 +12,8 @@ mod kelly;
 mod polymarket;
 mod proxy;
 mod risk;
+mod runtime_state;
+mod sanity;
 mod stoikov;
 mod telegram;
 mod types;
@@ -37,6 +40,8 @@ use feeds::{
 };
 use polymarket::{client::PolymarketClient, poller::PolymarketPoller};
 use risk::RiskManager;
+use runtime_state::{persist_loop as state_persist_loop, RuntimeStateSnapshot};
+use sanity::run_startup_sanity;
 use telegram::Telegram;
 use types::{Asset, PriceSource, PriceTick, Timeframe};
 
@@ -311,6 +316,27 @@ async fn main() -> Result<()> {
     // Shared services
     let poly_client = Arc::new(PolymarketClient::new(&cfg)?);
 
+    let restored_state = if cfg.state_persist_enabled {
+        match RuntimeStateSnapshot::load(&cfg.state_file) {
+            Ok(state) => state,
+            Err(e) => {
+                warn!(
+                    "[State] Failed to load snapshot from {}: {}",
+                    cfg.state_file,
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let started_at_unix = restored_state
+        .as_ref()
+        .map(|s| s.started_at_unix)
+        .unwrap_or_else(|| Utc::now().timestamp());
+
     if cfg.paper_trading {
         let mut bankroll_set = false;
 
@@ -412,6 +438,15 @@ async fn main() -> Result<()> {
     }
 
     let risk = Arc::new(RiskManager::new(cfg.clone()));
+    if let Some(state) = restored_state.as_ref() {
+        risk.restore_snapshot(&state.risk);
+        info!(
+            "[State] Restored runtime snapshot (mode={}, updated_at={})",
+            state.mode,
+            state.updated_at_unix
+        );
+    }
+
     let tg = Arc::new(Telegram::new(
         cfg.enable_telegram,
         cfg.telegram_bot_token.clone(),
@@ -425,7 +460,12 @@ async fn main() -> Result<()> {
         .iter()
         .map(|t| t.size_usdc)
         .sum();
+    let startup_open_positions = db
+        .open_positions()
+        .unwrap_or_default()
+        .len() as i64;
     risk.set_open_exposure_usdc(startup_open_exposure);
+    risk.set_open_position_count(startup_open_positions);
 
     // Build contract slots from configured timeframes.
     // For up/down markets there is no fixed strike; we use 0.0 as a sentinel.
@@ -515,6 +555,10 @@ async fn main() -> Result<()> {
             strike: 0.0,
             expiry_ts: eod_ts,
         });
+    }
+
+    if cfg.enable_sanity_checks {
+        run_startup_sanity(poly_client.clone(), &contracts).await;
     }
 
     // Channels
@@ -642,6 +686,25 @@ async fn main() -> Result<()> {
         let latest = latest_prices.clone();
         let tfs = cfg.market_timeframes.clone();
         handles.push(tokio::spawn(async move { stats_printer(r, latest, tfs).await; }));
+    }
+    if cfg.state_persist_enabled {
+        let state_path = cfg.state_file.clone();
+        let mode = if cfg.is_live() { "live".to_string() } else { "paper".to_string() };
+        let interval_secs = cfg.state_persist_interval_secs;
+        let r = risk.clone();
+        let d = db.clone();
+        let shutdown = shutdown_rx.clone();
+        handles.push(tokio::spawn(async move {
+            state_persist_loop(state_path, mode, started_at_unix, interval_secs, r, d, shutdown).await;
+        }));
+    }
+    if cfg.comments_enabled {
+        let cfg_c = cfg.clone();
+        let contracts_c = contracts.clone();
+        let shutdown = shutdown_rx.clone();
+        handles.push(tokio::spawn(async move {
+            comments::comment_watcher_loop(cfg_c, contracts_c, shutdown).await;
+        }));
     }
 
     // Startup Telegram notification

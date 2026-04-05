@@ -33,6 +33,18 @@ pub struct Config {
     pub enable_database: bool,
     /// Enable ratatui dashboard in foreground (default false for console-only mode)
     pub enable_tui: bool,
+    /// Enable startup sanity checks against Polymarket/Gamma APIs.
+    pub enable_sanity_checks: bool,
+    /// Enable comment watcher polling loop.
+    pub comments_enabled: bool,
+    /// Comment watcher poll interval in seconds.
+    pub comments_interval_secs: u64,
+    /// Persist runtime state snapshots to disk.
+    pub state_persist_enabled: bool,
+    /// Runtime state snapshot path.
+    pub state_file: String,
+    /// Runtime state persistence interval in seconds.
+    pub state_persist_interval_secs: u64,
     /// Enable BTC 1s Binance kline momentum signal logs.
     pub enable_binance_signal_1s: bool,
     /// Sensitivity threshold for BTC 1s close-to-close signal (% move).
@@ -58,6 +70,14 @@ pub struct Config {
     pub settlement_buffer_seconds: u64,
     /// Max allowed top-of-book spread for entry token probability.
     pub max_spread: f64,
+    /// Maximum concurrently open positions.
+    pub max_concurrent_positions: u64,
+    /// Circuit breaker threshold for consecutive missed fills.
+    pub cb_consecutive_missed_fills: u64,
+    /// Circuit breaker threshold for unfavorable slippage (fraction, 0.05 = 5%).
+    pub cb_slippage_threshold: f64,
+    /// Trigger circuit breaker on resolution mismatch checks.
+    pub cb_resolution_mismatch: bool,
 
     /// Min lag in percentage points to trigger a scan (3pp default)
     pub lag_threshold_pp: f64,
@@ -161,6 +181,12 @@ impl Config {
             enable_telegram: parse_bool("ENABLE_TELEGRAM", false),
             enable_database: parse_bool("ENABLE_DATABASE", false),
             enable_tui: parse_bool("ENABLE_TUI", false),
+            enable_sanity_checks: parse_bool("ENABLE_SANITY_CHECKS", true),
+            comments_enabled: parse_bool("COMMENTS_ENABLED", false),
+            comments_interval_secs: parse_u64("COMMENTS_INTERVAL", 30)?,
+            state_persist_enabled: parse_bool("STATE_PERSIST_ENABLED", true),
+            state_file: env::var("STATE_FILE").unwrap_or_else(|_| "runtime_state.json".into()),
+            state_persist_interval_secs: parse_u64("STATE_PERSIST_INTERVAL_SECS", 30)?,
             enable_binance_signal_1s: parse_bool("ENABLE_BINANCE_SIGNAL_1S", true),
             binance_signal_threshold_pct: parse_f64("BINANCE_SIGNAL_THRESHOLD_PCT", 0.01)?,
 
@@ -177,6 +203,10 @@ impl Config {
             min_edge: parse_f64("MIN_EDGE", 0.00)?,
             settlement_buffer_seconds: parse_u64("SETTLEMENT_BUFFER_SECONDS", 300)?,
             max_spread: parse_f64("MAX_SPREAD", 0.05)?,
+            max_concurrent_positions: parse_u64("MAX_CONCURRENT_POSITIONS", 4)?,
+            cb_consecutive_missed_fills: parse_u64("CB_CONSECUTIVE_MISSED_FILLS", 3)?,
+            cb_slippage_threshold: parse_f64("CB_SLIPPAGE_THRESHOLD", 0.05)?,
+            cb_resolution_mismatch: parse_bool("CB_RESOLUTION_MISMATCH", true),
             lag_threshold_pp: parse_f64("LAG_THRESHOLD_PP", 3.0)?,
             min_edge_pct: parse_f64("MIN_EDGE_PCT", 5.0)?,
             max_position_pct: parse_f64("MAX_POSITION_PCT", 8.0)?,

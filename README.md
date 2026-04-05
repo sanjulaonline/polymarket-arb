@@ -29,6 +29,10 @@ prompt spec, rewritten in Rust for sub-100ms execution, and heavily upgraded wit
 | Telegram alerts on every trade | ✅ `telegram.rs` |
 | Telegram alerts on drawdown | ✅ |
 | Kill switch at 20% daily drawdown | ✅ `DAILY_DRAWDOWN_KILL_PCT` |
+| Circuit breaker (missed fills / slippage / mismatch) | ✅ `CB_*` |
+| Runtime state snapshot + restore | ✅ `runtime_state.rs` |
+| Startup API sanity checks | ✅ `sanity.rs` |
+| Polymarket comments watcher loop | ✅ `comments.rs` |
 | SQLite trade log with full history | ✅ `database.rs` |
 | Console-only runtime logs (default) | ✅ |
 | Optional terminal dashboard (ENABLE_TUI=true) | ✅ `dashboard.rs` |
@@ -110,6 +114,21 @@ Optional fast Binance signal knobs (in `.env`):
 ```env
 ENABLE_BINANCE_SIGNAL_1S=true
 BINANCE_SIGNAL_THRESHOLD_PCT=0.01
+```
+
+Operational runtime knobs (in `.env`):
+
+```env
+ENABLE_SANITY_CHECKS=true
+STATE_PERSIST_ENABLED=true
+STATE_FILE=runtime_state.json
+STATE_PERSIST_INTERVAL_SECS=30
+COMMENTS_ENABLED=false
+COMMENTS_INTERVAL=30
+MAX_CONCURRENT_POSITIONS=4
+CB_CONSECUTIVE_MISSED_FILLS=3
+CB_SLIPPAGE_THRESHOLD=0.05
+CB_RESOLUTION_MISMATCH=true
 ```
 
 This logs sample-style momentum messages from closed BTC 1s candles:
@@ -315,6 +334,9 @@ Query trades directly: `sqlite3 trades.db "SELECT * FROM trades ORDER BY id DESC
 │   ├── risk.rs            — kill switch, drawdown, exposure caps
 │   ├── database.rs        — SQLite persistence
 │   ├── telegram.rs        — Telegram alerts
+│   ├── runtime_state.rs   — runtime snapshot persistence/restore
+│   ├── sanity.rs          — startup API sanity probes
+│   ├── comments.rs        — Polymarket comments watcher
 │   ├── feeds/
 │   │   ├── mod.rs         — PriceAggregator (multi-source, staleness-aware)
 │   │   ├── binance.rs     — Binance combined stream WS (BTC+ETH)

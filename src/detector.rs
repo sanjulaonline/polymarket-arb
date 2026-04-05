@@ -896,6 +896,7 @@ impl Detector {
                 }
                 self.risk.release_open_exposure(record.size_usdc);
                 self.risk.record_pnl(pnl, won);
+                self.risk.record_resolution_mismatch(true, won);
                 info!(
                     "[Paper] Settled #{} {}/{} result={} pnl={:+.2} px={:.2} strike={:.2}",
                     id,
@@ -939,6 +940,7 @@ impl Detector {
             }
             self.risk.release_open_exposure(record.size_usdc);
             self.risk.record_pnl(pnl, won);
+            self.risk.record_resolution_mismatch(true, won);
             info!(
                 "[PaperRedeem] Settled #{} {}/{} result={} payout={:.2} pnl={:+.2}",
                 id,
@@ -1088,6 +1090,7 @@ impl Detector {
         if !self.cfg.is_live() {
             let row_id = self.db.insert_trade(&record).unwrap_or(0);
             self.risk.reserve_open_exposure(size_usdc);
+            self.risk.record_fill_success();
             {
                 let mut states = self.states.lock();
                 if let Some(state) = states.get_mut(&slot_key) {
@@ -1121,6 +1124,8 @@ impl Detector {
                 let ms = t0.elapsed().as_millis();
                 info!("[Executor] ✓ {order_id} | {asset_str}/{tf_str} {direction_str} ${size_usdc:.2} | {ms}ms");
                 self.risk.reserve_open_exposure(size_usdc);
+                self.risk.record_fill_success();
+                self.risk.record_slippage(entry_prob, entry_prob);
 
                 // Record fill in Stoikov inventory
                 {
@@ -1138,7 +1143,10 @@ impl Detector {
                 self.tg.trade_alert(false, &asset_str, &tf_str, direction_str,
                     size_usdc, snap.effective_edge_pct(), snap.confidence, Some(&order_id)).await;
             }
-            Err(e) => warn!("[Executor] Order failed: {e}"),
+            Err(e) => {
+                self.risk.record_missed_fill();
+                warn!("[Executor] Order failed: {e}");
+            }
         }
     }
 
