@@ -195,6 +195,7 @@ Scheme precedence is:
 - Set `PROXY_WALLET` to the wallet address whose USDC.e balance should size paper bankroll
 - Optionally set `POLYGON_RPC_URL` (defaults to `https://polygon.publicnode.com`)
 - Optional fallback list: `POLYGON_RPC_FALLBACK_URLS` (comma-separated)
+     - Recommended keyless defaults: `https://polygon.drpc.org,https://polygon-bor-rpc.publicnode.com,https://polygon-rpc.com`
 
 ### 4. Build release binary
 
@@ -238,6 +239,16 @@ The Polygon path is the Rust port of the typical ethers.js flow:
 If your primary RPC returns auth errors (401/403, disabled API key, etc.),
 the bot automatically retries `POLYGON_RPC_FALLBACK_URLS` before falling back
 to CLOB/env bankroll sources.
+
+If you see startup warnings like:
+- `Polygon USDC.e balanceOf(PROXY_WALLET) failed ... Unauthorized`
+- `CLOB collateral balance fetch ... HTTP 401 Unauthorized`
+
+then both dynamic bankroll sources were unavailable and the bot will safely use
+`PORTFOLIO_SIZE_USDC` fallback. Fix by:
+1. Using RPC endpoints that allow unauthenticated `eth_call`, or providing API-keyed RPC URLs.
+2. Verifying `POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, and `POLYMARKET_API_PASSPHRASE`.
+3. If running fully paper/keyless, set Polymarket API vars to `PAPER_MODE` placeholders.
 
 To enable live trading, **all four** conditions must be met in `.env`:
 

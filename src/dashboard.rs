@@ -22,18 +22,36 @@ use std::{
 };
 use tokio::sync::watch;
 
-use crate::{database::Database, risk::RiskManager, config::Config};
+use crate::{
+    config::Config,
+    database::Database,
+    monitor::SharedMonitorState,
+    risk::RiskManager,
+};
 
 pub struct Dashboard {
     db: Arc<Database>,
     risk: Arc<RiskManager>,
     cfg: Config,
     market_titles: Vec<String>,
+    monitor_state: SharedMonitorState,
 }
 
 impl Dashboard {
-    pub fn new(db: Arc<Database>, risk: Arc<RiskManager>, cfg: Config, market_titles: Vec<String>) -> Self {
-        Self { db, risk, cfg, market_titles }
+    pub fn new(
+        db: Arc<Database>,
+        risk: Arc<RiskManager>,
+        cfg: Config,
+        market_titles: Vec<String>,
+        monitor_state: SharedMonitorState,
+    ) -> Self {
+        Self {
+            db,
+            risk,
+            cfg,
+            market_titles,
+            monitor_state,
+        }
     }
 
     pub async fn run(&self, shutdown: watch::Receiver<bool>) -> Result<()> {
@@ -82,13 +100,14 @@ impl Dashboard {
     fn render(&self, f: &mut Frame) {
         let size = f.size();
 
-        // Main layout: header | body | footer
+        // Main layout: header | stats | trades | monitor | footer
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),  // header
                 Constraint::Length(6),  // stats row
-                Constraint::Min(10),    // trades tables
+                Constraint::Min(8),     // trades tables
+                Constraint::Length(6),  // pair monitor
                 Constraint::Length(1),  // footer
             ])
             .split(size);
@@ -252,10 +271,61 @@ impl Dashboard {
         .block(Block::default().title(" Last 10 Trades ").borders(Borders::ALL));
         f.render_widget(recent_table, table_chunks[1]);
 
+        // ── Pair monitor ────────────────────────────────────────────────────
+        let (latest_prices, recent_arbitrage) = {
+            let guard = self.monitor_state.read();
+            (guard.latest_prices(), guard.recent_arbitrage(4))
+        };
+
+        let mut monitor_lines: Vec<Line> = Vec::new();
+        if latest_prices.is_empty() {
+            monitor_lines.push(Line::from(Span::styled(
+                "Waiting for monitor data...",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            for price in latest_prices.into_iter().take(3) {
+                let arb_flag = if price.has_arbitrage { "ARB" } else { "-" };
+                let arb_color = if price.has_arbitrage {
+                    Color::Green
+                } else {
+                    Color::DarkGray
+                };
+                monitor_lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{:8}", price.market),
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!(
+                        " UP_ASK={:.4} DOWN_ASK={:.4} ASK_SUM={:.4} SPREAD={:+.4} ",
+                        price.up_ask, price.down_ask, price.ask_sum, price.spread
+                    )),
+                    Span::styled(arb_flag, Style::default().fg(arb_color)),
+                ]));
+            }
+        }
+
+        if let Some(last_arb) = recent_arbitrage.first() {
+            monitor_lines.push(Line::from(Span::styled(
+                format!(
+                    "Last ARB {}: ask_sum={:.4} spread={:+.4} ({:.2}%)",
+                    last_arb.market,
+                    last_arb.detection.ask_sum,
+                    last_arb.detection.spread,
+                    last_arb.detection.spread_percent
+                ),
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            )));
+        }
+
+        let monitor_panel = Paragraph::new(monitor_lines)
+            .block(Block::default().title(" Pair Monitor (YES + NO asks) ").borders(Borders::ALL));
+        f.render_widget(monitor_panel, chunks[3]);
+
         // ── Footer ────────────────────────────────────────────────────────────
         let footer = Paragraph::new(" [q] Quit  |  Refreshes every 500ms")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
-        f.render_widget(footer, chunks[3]);
+        f.render_widget(footer, chunks[4]);
     }
 }

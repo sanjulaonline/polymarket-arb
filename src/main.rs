@@ -9,6 +9,7 @@ mod database;
 mod detector;
 mod feeds;
 mod kelly;
+mod monitor;
 mod polymarket;
 mod proxy;
 mod risk;
@@ -24,7 +25,7 @@ use dashmap::DashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use url::Url;
 
 use config::Config;
@@ -38,6 +39,7 @@ use feeds::{
     tradingview::TradingViewFeed,
     PriceAggregator,
 };
+use monitor::{new_shared_monitor_state, run_price_monitor_loop};
 use polymarket::{client::PolymarketClient, poller::PolymarketPoller};
 use risk::RiskManager;
 use runtime_state::{persist_loop as state_persist_loop, RuntimeStateSnapshot};
@@ -308,6 +310,10 @@ async fn main() -> Result<()> {
     info!("[Init] Enabled BTC contract timeframes: {}", configured_timeframes);
     info!("[Init] Polymarket poll cadence: {}ms", cfg.poly_poll_ms);
     info!(
+        "[Init] Pair monitor threshold (YES_ASK + NO_ASK): {:.4}",
+        cfg.pair_ask_arb_threshold
+    );
+    info!(
         "[Init] Entry guardrails: MIN_TRADE_INTERVAL_MS={} | PAPER_SINGLE_POSITION_PER_SLOT={}",
         cfg.min_trade_interval_ms,
         cfg.paper_single_position_per_slot
@@ -388,13 +394,31 @@ async fn main() -> Result<()> {
                         }
                     }
                     Err(e) => {
+                        let e_text = e.to_string();
+                        let e_lc = e_text.to_ascii_lowercase();
+                        let auth_like = e_lc.contains("unauthorized")
+                            || e_lc.contains("authenticate")
+                            || e_lc.contains("forbidden")
+                            || e_lc.contains("http 401")
+                            || e_lc.contains("http 403");
                         let has_more = idx + 1 < rpc_candidates.len();
-                        if has_more {
+                        if has_more && auth_like {
+                            warn!(
+                                "[Init] Polygon RPC {} rejected unauthenticated request; trying next RPC endpoint (configure provider API key if required)",
+                                label
+                            );
+                            debug!("[Init] Polygon RPC {} auth detail: {}", label, e_text);
+                        } else if has_more {
                             warn!(
                                 "[Init] Polygon RPC {} failed: {}. Trying next RPC endpoint",
                                 label,
                                 e
                             );
+                        } else if auth_like {
+                            warn!(
+                                "[Init] Polygon USDC.e balanceOf(PROXY_WALLET) failed on all RPC endpoints due authorization errors. Trying CLOB balance fallback"
+                            );
+                            debug!("[Init] Polygon final auth detail: {}", e_text);
                         } else {
                             warn!(
                                 "[Init] Polygon USDC.e balanceOf(PROXY_WALLET) failed on all RPC endpoints: {}. Trying CLOB balance fallback",
@@ -435,11 +459,24 @@ async fn main() -> Result<()> {
                         );
                     }
                     Err(e) => {
-                        warn!(
-                            "[Init] CLOB collateral balance fetch failed: {}. Using PORTFOLIO_SIZE_USDC=${:.2}",
-                            e,
-                            cfg.portfolio_size_usdc
-                        );
+                        let e_text = e.to_string();
+                        let e_lc = e_text.to_ascii_lowercase();
+                        let unauthorized = e_lc.contains("unauthorized")
+                            || e_lc.contains("http 401")
+                            || e_lc.contains("http 403");
+                        if unauthorized {
+                            warn!(
+                                "[Init] CLOB collateral balance fetch unauthorized (401/403). Verify POLYMARKET_API_KEY/SECRET/PASSPHRASE or set PAPER_MODE placeholders; using PORTFOLIO_SIZE_USDC=${:.2}",
+                                cfg.portfolio_size_usdc
+                            );
+                            debug!("[Init] CLOB auth detail: {}", e_text);
+                        } else {
+                            warn!(
+                                "[Init] CLOB collateral balance fetch failed: {}. Using PORTFOLIO_SIZE_USDC=${:.2}",
+                                e,
+                                cfg.portfolio_size_usdc
+                            );
+                        }
                     }
                 }
             }
@@ -584,6 +621,7 @@ async fn main() -> Result<()> {
     // Aggregator
     let aggregator = PriceAggregator::new(agg_tx.clone());
     let latest_prices = aggregator.latest_map();
+    let monitor_state = new_shared_monitor_state();
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -703,6 +741,16 @@ async fn main() -> Result<()> {
         let tfs = cfg.market_timeframes.clone();
         handles.push(tokio::spawn(async move { stats_printer(r, latest, tfs).await; }));
     }
+    {
+        let client = poly_client.clone();
+        let slots = contracts.clone();
+        let state = monitor_state.clone();
+        let threshold = cfg.pair_ask_arb_threshold;
+        let shutdown = shutdown_rx.clone();
+        handles.push(tokio::spawn(async move {
+            run_price_monitor_loop(client, slots, state, threshold, shutdown).await;
+        }));
+    }
     if cfg.state_persist_enabled {
         let state_path = cfg.state_file.clone();
         let mode = if cfg.is_live() { "live".to_string() } else { "paper".to_string() };
@@ -735,7 +783,13 @@ async fn main() -> Result<()> {
     if cfg.enable_tui {
         let market_titles: Vec<String> = contracts.iter().map(|c| format!("BTC {}: {}", c.timeframe, c.title)).collect();
         info!("[Runtime] TUI dashboard enabled. Press q/Esc to stop.");
-        let dash = Dashboard::new(db.clone(), risk.clone(), cfg.clone(), market_titles);
+        let dash = Dashboard::new(
+            db.clone(),
+            risk.clone(),
+            cfg.clone(),
+            market_titles,
+            monitor_state.clone(),
+        );
         if let Err(e) = dash.run(shutdown_rx).await {
             warn!("[Dashboard] failed: {}. Falling back to console mode.", e);
             info!("[Runtime] Console-only mode active. Press Ctrl+C to stop.");

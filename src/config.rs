@@ -70,6 +70,8 @@ pub struct Config {
     pub settlement_buffer_seconds: u64,
     /// Max allowed top-of-book spread for entry token probability.
     pub max_spread: f64,
+    /// Monitor alert threshold for YES_ASK + NO_ASK pair pricing.
+    pub pair_ask_arb_threshold: f64,
     /// Maximum concurrently open positions.
     pub max_concurrent_positions: u64,
     /// Circuit breaker threshold for consecutive missed fills.
@@ -153,7 +155,7 @@ impl Config {
                 &[
                     "https://polygon.drpc.org",
                     "https://polygon-bor-rpc.publicnode.com",
-                    "https://rpc.ankr.com/polygon",
+                    "https://polygon-rpc.com",
                 ],
             )?,
             proxy_wallet: env::var("PROXY_WALLET")
@@ -203,6 +205,7 @@ impl Config {
             min_edge: parse_f64("MIN_EDGE", 0.00)?,
             settlement_buffer_seconds: parse_u64("SETTLEMENT_BUFFER_SECONDS", 300)?,
             max_spread: parse_f64("MAX_SPREAD", 0.05)?,
+            pair_ask_arb_threshold: parse_f64("PAIR_ASK_ARB_THRESHOLD", 1.0)?,
             max_concurrent_positions: parse_u64("MAX_CONCURRENT_POSITIONS", 4)?,
             cb_consecutive_missed_fills: parse_u64("CB_CONSECUTIVE_MISSED_FILLS", 3)?,
             cb_slippage_threshold: parse_f64("CB_SLIPPAGE_THRESHOLD", 0.05)?,
